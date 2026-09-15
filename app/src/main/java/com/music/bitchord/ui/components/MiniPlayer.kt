@@ -29,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,6 +38,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -114,6 +116,46 @@ private val ROW_PADDING_HORIZONTAL = 12.dp
  */
 private val ART_CORNER = 8.dp
 
+/** Distance that makes a horizontal drag an intentional track change. */
+private val TRACK_SWIPE_THRESHOLD = 72.dp
+
+/**
+ * Shared gesture for both mini-player materials. A left swipe advances through
+ * the queue; a right swipe goes back, matching the full player's artwork
+ * gesture. Waiting until drag end prevents one long gesture from skipping more
+ * than one item.
+ */
+@Composable
+internal fun Modifier.miniPlayerTrackSwipe(
+    onNext: () -> Unit,
+    onPrevious: () -> Unit,
+): Modifier {
+    // Playback state updates can recompose the bar while a finger is down.
+    // Keep the gesture coroutine alive through those updates while still
+    // dispatching to the latest controller callbacks when the drag finishes.
+    val currentOnNext by rememberUpdatedState(onNext)
+    val currentOnPrevious by rememberUpdatedState(onPrevious)
+    return pointerInput(Unit) {
+        val threshold = TRACK_SWIPE_THRESHOLD.toPx()
+        var totalDrag = 0f
+        detectHorizontalDragGestures(
+            onDragStart = { totalDrag = 0f },
+            onDragCancel = { totalDrag = 0f },
+            onDragEnd = {
+                when {
+                    totalDrag <= -threshold -> currentOnNext()
+                    totalDrag >= threshold -> currentOnPrevious()
+                }
+                totalDrag = 0f
+            },
+            onHorizontalDrag = { change, amount ->
+                change.consume()
+                totalDrag += amount
+            },
+        )
+    }
+}
+
 /** Frosted mini player that rides just above the floating tab bar. */
 @OptIn(ExperimentalHazeMaterialsApi::class)
 @Composable
@@ -180,7 +222,17 @@ fun MiniPlayer(
             // Deliberately silent: the whole bar is the target, so it catches
             // stray taps meant for the page behind it, and the sheet rising is
             // its own confirmation. The glyphs on it still buzz.
-            .clickable(onClick = onExpand),
+            .clickable(onClick = onExpand)
+            .miniPlayerTrackSwipe(
+                onNext = {
+                    haptics.play(Haptic.SkipNext)
+                    onNext()
+                },
+                onPrevious = {
+                    haptics.play(Haptic.SkipPrevious)
+                    onPrevious()
+                },
+            ),
     ) {
         Row(
             modifier = Modifier
