@@ -139,6 +139,12 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory {
         // PlaybackService because the Replay page reads it from the UI side and
         // both live in this process — one owner, one directory.
         ListeningStats.init(this)
+        // The last synced copy of the signed-in library, read by the Library tab
+        // and playlist pages when YouTube Music cannot be reached — the listener
+        // must not lose a shelf they already looked at just because they stepped
+        // into a lift. After ListeningStats' init, which sets the precedent for
+        // stores that keep their files under filesDir.
+        SyncedLibraryStore.init(this)
         // After AppSettings, whose switch decides whether half of it runs.
         ArtistFacts.init(this)
         // One cache directory can only be opened once per process, and

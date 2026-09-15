@@ -351,6 +351,28 @@ object ListeningStats {
         }
     }
 
+    /**
+     * Whole plays per video id, merged across every month on disk.
+     *
+     * The Replay merge keeps counts per *track id* in the same buckets, so an
+     * on-device list can be ordered by what was actually listened to without a
+     * second log to keep in step with it. Tracks never played are simply absent
+     * — a caller asking "most first" reads a missing id as zero.
+     */
+    suspend fun playCounts(): Map<String, Int> = withContext(Dispatchers.IO) {
+        if (!ready) return@withContext emptyMap()
+        flushAndAwait()
+        val counts = HashMap<String, Int>()
+        months().forEach { month ->
+            read(month.toString())?.let { bucket ->
+                bucket.tracks.forEach { entry ->
+                    counts[entry.id] = (counts[entry.id] ?: 0) + entry.plays
+                }
+            }
+        }
+        counts
+    }
+
     /** Every month with a file, oldest first. */
     fun months(): List<YearMonth> {
         if (!ready) return emptyList()

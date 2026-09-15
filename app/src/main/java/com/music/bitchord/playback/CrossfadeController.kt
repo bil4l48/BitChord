@@ -636,6 +636,33 @@ class CrossfadeController(
             }
         }
 
+        override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+            // Queue edits that reorder, remove or insert mid-queue don't move
+            // the playing item, so none of the above fires for them — but they
+            // still leave the standby holding a queue the session no longer
+            // has. Adopting it at the handoff would silently un-apply the edit:
+            // a shuffle toggle un-shuffled, removed rows resurrected, queued
+            // tracks dropped. Pure appends are fine, which is what
+            // [armedQueueIntact] checks — [reconcileQueue] carries those across
+            // at the handoff. Past the handoff the session already moved, so
+            // there is nothing stale left to protect.
+            if (phase == Phase.IDLE || handedOff) return
+            val out = outgoing ?: return bail()
+            val current = (0 until out.mediaItemCount).map { out.getMediaItemAt(it).mediaId }
+            if (!armedQueueIntact(armedIds, current)) bail()
+        }
+
+        override fun onRepeatModeChanged(repeatMode: Int) {
+            // The standby copied the repeat mode when the transition armed, so
+            // a change now lands on the outgoing player and would be lost at
+            // the handoff: a repeat-all asked for mid-blend would silently stop
+            // at the end of the queue instead of looping it. Past the handoff
+            // the session already moved, so a change lands where it should and
+            // there is nothing to unwind.
+            if (phase == Phase.IDLE || handedOff) return
+            bail()
+        }
+
         override fun onPlayerError(error: PlaybackException) = bail()
 
         // The session reached the end of a track [holdAtEnd] is holding, before
@@ -1876,6 +1903,7 @@ class CrossfadeController(
         handedOff = false
         outgoingItemIndex = C.INDEX_UNSET
         queuedItemCount = 0
+        armedIds = emptyList()
         incomingCueTimeMs = 0L
         incomingPlaybackRate = 1.0
         outgoingPlaybackRate = 1.0
@@ -3114,4 +3142,19 @@ class CrossfadeController(
         const val MAX_EXTRAPOLATION_NANOS = 600_000_000L
         const val BAIL_STEP_MS = 15L
     }
+}
+
+/**
+ * Whether the session queue still holds what the standby was armed with, plus
+ * at most tracks appended after it.
+ *
+ * Pure appends keep the armed order as a prefix, and those are the one edit
+ * [CrossfadeController.reconcileQueue] carries across at the handoff. Anything
+ * else — a shuffle toggle moving rows, a removal, an insertion, a replacement
+ * — means the standby's copy is stale and adopting it would silently un-apply
+ * the edit.
+ */
+internal fun armedQueueIntact(armed: List<String>, current: List<String>): Boolean {
+    if (current.size < armed.size) return false
+    return current.take(armed.size) == armed
 }

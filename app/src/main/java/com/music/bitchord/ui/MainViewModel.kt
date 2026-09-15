@@ -59,6 +59,7 @@ import android.util.LruCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -1191,6 +1192,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * Rebuilds the "You Might Like" section of the playlist at [browseId] —
+     * [com.music.bitchord.playback.PlaylistRecommendations] over fresh
+     * related-track feeds seeded from the playlist's own tracks, with its
+     * YouTube-suggested set as the familiar pool. The result replaces
+     * [DetailPage.suggestedSongs] for that page, which is exactly what the
+     * section renders, and the ids it served are remembered so a later
+     * Refresh plays the never-seen tracks first.
+     *
+     * Only an owned playlist's page surfaces the Refresh control, which is
+     * also the guarantee that the section's Add path can actually file the
+     * picks away — you can only take a track into a playlist you made.
+     * A playlist with no tracks has nothing to seed a recommendation from,
+     * so the section is simply left as the page brought it.
+     */
+    fun refreshPlaylistRecommendations(browseId: String) {
+        val page = _detailStack.value.firstOrNull { it.browseId == browseId } ?: return
+        val songs = (page.songs as? UiState.Success)?.data.orEmpty()
+        if (songs.isEmpty()) return
+        val shown = seenRecommendations[browseId].orEmpty()
+        viewModelScope.launch {
+            val picks = PlaylistRecommendations.build(
+                context = getApplication(),
+                playlist = songs,
+                suggested = page.suggestedSongs,
+                previouslyShown = shown,
+            )
+            seenRecommendations[browseId] = shown.toMutableSet().apply { addAll(picks.map { it.videoId }) }
+            _detailStack.value = _detailStack.value.map { p ->
+                if (p.browseId != browseId) p else p.copy(suggestedSongs = picks)
+            }
+        }
+    }
+
+    /**
+     * Which "You Might Like" tracks each playlist has already served, by video
+     * id — the weight they lose in the next Refresh. In-memory only: a single
+     * session is plenty for the section to vary, and forgetting with the app
+     * is the honest answer to "why has Refresh stopped changing?"
+     */
+    private val seenRecommendations = mutableMapOf<String, MutableSet<String>>()
+
+    /**
      * Puts [song] at the end of the playlist page at [browseId], if that page
      * is open — where YouTube itself puts it, so the order survives the next
      * fetch.
@@ -1307,6 +1350,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     editPlaylistShelf { items ->
                         items.filterNot { it.browseId == playlist.browseId }
                     }
+                    // A pin on a deleted playlist is a pin that names nothing:
+                    // forget it now rather than waiting for the next library
+                    // answer to notice it is gone.
+                    AppSettings.unpinPlaylists(setOf(playlist.browseId))
                     // Its page may be the one open; a deleted playlist has
                     // nothing left to show.
                     _detailStack.value = _detailStack.value
@@ -2608,41 +2655,53 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
                 else -> {
-                    YtMusicRepository.browseSongs(browseId).fold(
-                        onSuccess = { page ->
-                            // Free here — the page that returned these rows is
-                            // the one thing that states who made the playlist,
-                            // so its own menu never has to go and ask. Recorded
-                            // even when the listing came back empty.
-                            page.owned?.let { setPlaylistOwned(browseId, it) }
-                            // Only for the caller that had nothing: a card's own
-                            // title is what the user just tapped, and must not
-                            // be swapped for the header's wording underneath them.
-                            page.header?.let { header ->
-                                if (title.isBlank()) name = header.title
-                                // Album cards often only carry the artist, while
-                                // the page header also carries the release year.
-                                // Prefer that richer line so the year appears
-                                // directly below the artist on the album page.
-                                if (resolved == BrowseType.ALBUM && header.subtitle.isNotBlank()) {
-                                    credit = header.subtitle
-                                } else if (subtitle.isBlank()) {
-                                    credit = header.subtitle
-                                }
-                                if (thumbnailUrl == null) artwork = header.thumbnailUrl
+                    val result = YtMusicRepository.browseSongs(browseId)
+                    if (result.isFailure) {
+                        // Offline is when the last synced track order is worth
+                        // something: an opened playlist reads from disk instead
+                        // of answering with a network error. Never an empty
+                        // list — that stays the error it was before.
+                        cachedOfflineTracks(browseId)?.let { UiState.Success(it) }
+                            ?: UiState.Error(
+                                result.exceptionOrNull()?.friendly()
+                                    ?: result.exceptionOrNull().toString(),
+                            )
+                    } else {
+                        val page = result.getOrThrow()
+                        // Free here — the page that returned these rows is
+                        // the one thing that states who made the playlist,
+                        // so its own menu never has to go and ask. Recorded
+                        // even when the listing came back empty.
+                        page.owned?.let { setPlaylistOwned(browseId, it) }
+                        // Only for the caller that had nothing: a card's own
+                        // title is what the user just tapped, and must not
+                        // be swapped for the header's wording underneath them.
+                        page.header?.let { header ->
+                            if (title.isBlank()) name = header.title
+                            // Album cards often only carry the artist, while
+                            // the page header also carries the release year.
+                            // Prefer that richer line so the year appears
+                            // directly below the artist on the album page.
+                            if (resolved == BrowseType.ALBUM && header.subtitle.isNotBlank()) {
+                                credit = header.subtitle
+                            } else if (subtitle.isBlank()) {
+                                credit = header.subtitle
                             }
-                            description = page.description
-                            if (page.songs.isEmpty()) {
-                                UiState.Error(text(R.string.no_tracks_here))
-                            } else {
-                                more = page.continuation
-                                suggested = page.suggested.withArtwork(thumbnailUrl ?: artwork)
-                                library = page.library
-                                UiState.Success(page.songs.withArtwork(thumbnailUrl ?: artwork))
-                            }
-                        },
-                        onFailure = { UiState.Error(it.friendly()) },
-                    )
+                            if (thumbnailUrl == null) artwork = header.thumbnailUrl
+                        }
+                        description = page.description
+                        if (page.songs.isEmpty()) {
+                            UiState.Error(text(R.string.no_tracks_here))
+                        } else {
+                            // A freshly-fetched track order is the cache's best
+                            // chance of being complete for a later offline read.
+                            SyncedLibraryStore.savePlaylist(browseId, page.songs, listenerKey())
+                            more = page.continuation
+                            suggested = page.suggested.withArtwork(thumbnailUrl ?: artwork)
+                            library = page.library
+                            UiState.Success(page.songs.withArtwork(thumbnailUrl ?: artwork))
+                        }
+                    }
                 }
             }
             // Update by id — the user may have pushed another page meanwhile.
@@ -3404,4 +3463,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun text(id: Int): String = getApplication<Application>().getString(id)
+}
+
+/**
+ * The pinned playlist ids that name nothing on [page]'s shelves.
+ *
+ * The cleanup half of a pin: a pin is for a playlist that still exists, so a
+ * freshly answered library that no longer carries the id means the pin should
+ * be forgotten rather than left pointing at nothing — the "Pinned" row would be
+ * the one place that remembered a deleted playlist. Looked up across every
+ * shelf rather than just the playlists one, because Liked Music and other
+ * cards can carry a playlist id too.
+ *
+ * Pure so the rule is testable without Android: [pinned] is
+ * [AppSettings.pinnedPlaylists]'s value, and the shelves come off a
+ * [LibraryPage] whether it was fetched or read back off the offline cache.
+ */
+internal fun strayPinnedPlaylistIds(pinned: Collection<String>, page: LibraryPage): List<String> {
+    if (pinned.isEmpty()) return emptyList()
+    val known = HashSet<String>()
+    for (shelf in page.shelves) {
+        for (item in shelf.items) {
+            item.browseId?.let(known::add)
+        }
+    }
+    return pinned.filterNot { it in known }
 }

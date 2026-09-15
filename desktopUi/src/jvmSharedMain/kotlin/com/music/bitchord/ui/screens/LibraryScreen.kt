@@ -187,7 +187,36 @@ fun LibraryScreen(
                     // makes one — so the row is drawn either way, empty but
                     // for the tile that creates the first playlist.
                     val shelves = state.data.shelves
-                    if (shelves.none { it.title == PLAYLISTS }) {
+                    val playlistsShelf = shelves.firstOrNull { it.title == PLAYLISTS }
+                    // The pinned cards, in pin order. A pin can have been placed
+                    // on any playlist card — Liked Music as much as one off the
+                    // Playlists shelf — so a pinned id is looked up across every
+                    // shelf, and an id nothing names (one not yet cleaned up
+                    // after a delete elsewhere) simply contributes no card.
+                    val pinnedCards = pinnedPlaylists.mapNotNull { id ->
+                        playlistsShelf?.items?.firstOrNull { it.browseId == id }
+                            ?: shelves.asSequence().flatMap { it.items }.firstOrNull { it.browseId == id }
+                    }
+                    // The dedicated Pinned row, near the top of the page, with
+                    // the account shelves (and the new-playlist tile) below it.
+                    // The pinned cards lead here rather than in their shelf, so
+                    // the surf doesn't show the same card twice.
+                    if (pinnedCards.isNotEmpty()) {
+                        item(key = "shelf:pinned") {
+                            val pinnedShelf = HomeShelf(
+                                title = stringResource(R.string.pinned),
+                                items = pinnedCards,
+                            )
+                            LibraryGridShelf(
+                                shelf = pinnedShelf,
+                                onItemClick = onShelfItemClick,
+                                onItemLongPress = onShelfItemLongPress,
+                                onShowAll = { onShowAll(pinnedShelf) },
+                                pinnedPlaylists = pinnedPlaylists,
+                            )
+                        }
+                    }
+                    if (playlistsShelf == null) {
                         item(key = "shelf:$PLAYLISTS") {
                             val emptyPlaylists = HomeShelf(PLAYLISTS, emptyList())
                             PlaylistShelf(
@@ -200,12 +229,20 @@ fun LibraryScreen(
                             )
                         }
                     }
+                    // The cards the Pinned row already shows are left off their
+                    // own shelf, so a pinned playlist lives in exactly one place
+                    // on the page. Everything else keeps its existing order.
+                    val pinnedIds = pinnedCards.mapNotNullTo(hashSetOf()) { it.browseId }
+                    val playlistsForShelf = playlistsShelf?.takeIf { pinnedIds.isNotEmpty() }
+                        ?.let { it.copy(items = it.items.filterNot { item -> item.browseId in pinnedIds }) }
                     shelves.forEach { shelf ->
                         item(key = "shelf:${shelf.title}") {
                             if (shelf.title == PLAYLISTS) {
-                                val pinnedFirst = shelf.pinnedFirst(pinnedPlaylists)
+                                // "Show all" still opens every card (pinned
+                                // included), since the grid re-leads with them
+                                // itself — see [LibraryGridPage].
                                 PlaylistShelf(
-                                    shelf = pinnedFirst,
+                                    shelf = playlistsForShelf ?: shelf,
                                     onItemClick = onShelfItemClick,
                                     onItemLongPress = onShelfItemLongPress,
                                     onNewPlaylist = onNewPlaylist,
@@ -463,15 +500,19 @@ private fun HomeShelf.pinnedFirst(pinned: List<String>): HomeShelf {
 }
 
 /**
- * A card's title is all a Library shelf carries, so [LibrarySort.DEFAULT] is
- * the only option that isn't alphabetical — everything else sorts on it.
+ * A card's title is all a Library shelf carries, so [LocalMusicSort.DEFAULT] is
+ * the only option that isn't alphabetical — everything else sorts on it. The
+ * universal date/play-count criteria deliberately fall back to the shelf's own
+ * order: a card has neither a MediaStore timestamp nor a play count, so those
+ * options are not offered on these grids at all (see [LIBRARY_GRID_SORT_OPTIONS]).
  */
-private fun HomeShelf.sortedForLibrary(sort: LibrarySort): HomeShelf = when (sort) {
-    LibrarySort.DEFAULT -> this
-    LibrarySort.TITLE_ASC -> copy(items = items.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title }))
-    LibrarySort.TITLE_DESC -> copy(
+private fun HomeShelf.sortedForLibrary(sort: LocalMusicSort): HomeShelf = when (sort) {
+    LocalMusicSort.DEFAULT -> this
+    LocalMusicSort.TITLE_ASC -> copy(items = items.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title }))
+    LocalMusicSort.TITLE_DESC -> copy(
         items = items.sortedWith(compareByDescending(String.CASE_INSENSITIVE_ORDER) { it.title }),
     )
+    else -> this
 }
 
 /** The library feed whose cards are the account's own — see [PlaylistShelf]. */

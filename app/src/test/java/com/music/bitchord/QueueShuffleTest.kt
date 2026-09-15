@@ -1,5 +1,6 @@
 package com.music.bitchord
 
+import com.music.bitchord.data.model.Song
 import com.music.bitchord.playback.QueueShuffle
 import com.music.bitchord.playback.queueStartIndex
 import org.junit.Assert.assertEquals
@@ -95,6 +96,40 @@ class QueueShuffleTest {
             listOf("b", "d"),
             restored(upcoming = listOf("d", "b"), original = listOf("a", "b", "c", "d")),
         )
+    }
+
+    private fun song(id: String) = Song(
+        videoId = id,
+        title = "Title $id",
+        artist = "Artist",
+        thumbnailUrl = null,
+    )
+
+    @Test
+    fun `starting a queue while shuffled leads with the picked track`() {
+        val songs = ('a'..'e').map { song(it.toString()) }
+        repeat(20) {
+            val start = (songs.indices).random()
+            val ordered = QueueShuffle.startingOrder(songs, start)
+            // The picked track leads, and nothing is lost or duplicated: the
+            // rest is the same multiset in a shuffled order.
+            assertEquals(songs[start], ordered.first())
+            assertEquals(songs.size, ordered.size)
+            assertEquals(songs.map { it.videoId }.sorted(), ordered.map { it.videoId }.sorted())
+        }
+    }
+
+    @Test
+    fun `a started queue restores to playlist order through moves`() {
+        // The toggle-off path rearranges with the same moves machinery tested
+        // above, so a started queue must round-trip: shuffled order back to
+        // the playlist order it was built from.
+        val songs = ('a'..'e').map { song(it.toString()) }
+        val ids = songs.map { it.videoId }
+        repeat(20) {
+            val ordered = QueueShuffle.startingOrder(songs, 0).map { it.videoId }
+            assertEquals(ids, applied(ordered, from = 1, target = ids.drop(1)))
+        }
     }
 
     @Test

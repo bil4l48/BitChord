@@ -153,7 +153,7 @@ import kotlinx.coroutines.withContext
 import com.music.bitchord.data.model.durationMillis
 import com.music.bitchord.data.scrobbling.LastFM
 import com.music.bitchord.data.settings.AppSettings
-import com.music.bitchord.data.settings.LibrarySort
+import com.music.bitchord.data.settings.LocalMusicSort
 import com.music.bitchord.data.settings.ThemeMode
 import com.music.bitchord.ui.components.AccountProfileSelector
 import com.music.bitchord.ui.components.SpotifyImportAlert
@@ -312,6 +312,9 @@ import com.music.bitchord.data.settings.LocalMusicSort
 import com.music.bitchord.ui.screens.HomeScreen
 import com.music.bitchord.ui.screens.LibraryGridPage
 import com.music.bitchord.ui.screens.LibraryScreen
+import com.music.bitchord.ui.screens.DETAIL_SORT_OPTIONS
+import com.music.bitchord.ui.screens.LIBRARY_GRID_SORT_OPTIONS
+import com.music.bitchord.ui.screens.LocalMusicSortMenu
 import com.music.bitchord.ui.screens.MoodGenrePlaylistsScreen
 import com.music.bitchord.ui.screens.SearchScreen
 import com.music.bitchord.data.settings.SongSort
@@ -845,6 +848,11 @@ private fun BitChordApp(
     val qualityUpgradesInFlight by NerdStats.racingLossless.collectAsStateWithLifecycle()
     val playlists by viewModel.playlists.collectAsStateWithLifecycle()
     val playlistsLoading by viewModel.playlistsLoading.collectAsStateWithLifecycle()
+    // Who made each playlist — read reactively by the surfaces that care
+    // (the detail page's "You Might Like" among them); editablePlaylist
+    // itself reads plain values, which is right for a click handler and
+    // invisible to Compose.
+    val ownedPlaylistsByAccount by viewModel.playlistOwned.collectAsStateWithLifecycle()
 
     // Settings has no tab of its own — it sits on top of whatever tab was
     // selected. A pushed album/artist page (from the player, search, etc.)
@@ -1484,6 +1492,30 @@ private fun BitChordApp(
             )
             c.playSongs(oneOffQueue, 0)
             // Start radio in the mini-player; the user opens the full view by tapping it.
+        }
+    }
+
+    /**
+     * The Play tab's "Surprise Me" action — a fresh mix of roughly half
+     * familiar tracks, half discovery inside the listener's turf. Building it
+     * happens before the player is touched, so a failure (or an empty history)
+     * never destroys the queue already playing; it just reports and stops.
+     *
+     * The track starts like any other, but the sheet stays down: Surprise Me
+     * answers from wherever the listener is, so the Mini Player carries the
+     * playback and the full player opens only if they tap it. Manual track
+     * picks still raise the player via [play].
+     */
+    val surpriseMe: () -> Unit = {
+        scope.launch {
+            val queue = runCatching { SurpriseMe.build(context) }.getOrNull()
+            if (queue.isNullOrEmpty()) {
+                Toast.makeText(context, R.string.surprise_me_empty, Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            playRequestGeneration++
+            activeRadioSeed = null
+            controller?.playSongs(queue, Random.nextInt(queue.size))
         }
     }
 
@@ -2580,6 +2612,12 @@ private fun BitChordApp(
             // rather than throwing both away.
             if (detail == null && !showReplay) selectedTab = TAB_HOME
         }
+        // The Storage page sits one step inside Settings, so back closes only
+        // it — registered after the Settings handler so it wins while both are
+        // enabled, and closes Storage and never Home.
+        BackHandler(enabled = showStorage) {
+            showStorage = false
+        }
         BackHandler(
             enabled = detail == null && !showSettings && !showAccountScrobbling && !showSpotify &&
                 !showSources && !showListenTogether && !showWearOs && !showEqualizer && !showReplay && selectedMoodGenre == null &&
@@ -2633,6 +2671,7 @@ private fun BitChordApp(
                         // button sets `showSettings` from every page including
                         // this one, so with Replay winning the tie the button
                         // was live, hit, and changed nothing on screen.
+                        showStorage -> "storage"
                         showSettings -> "settings"
                         showReplay -> "replay"
                         detail != null -> detail.browseId
@@ -2701,7 +2740,8 @@ private fun BitChordApp(
                     // as its own replacement — which then fades out from under
                     // the identical copy fading in behind it.
                     val live = detailStack.lastOrNull()?.takeIf {
-                        it.browseId == key && key != "settings" && key != "account_scrobbling" &&
+                        it.browseId == key && key != "settings" && key != "storage" &&
+                            key != "account_scrobbling" &&
                             key != "discord" && key != "replay" && key != "history" &&
                             key != "library_show_all"
                     }
@@ -3052,6 +3092,18 @@ private fun BitChordApp(
                                 viewModel.openDetail(id, name, "Artist", null, BrowseType.ARTIST)
                             },
                             onAddSuggested = { song -> viewModel.addSuggestedSong(page.browseId, song) },
+                            // The refreshable "You Might Like" section is only
+                            // the user's own playlist's — the account who can
+                            // actually add to it. Ownership arrives with the
+                            // page load as often as not, so it is read from the
+                            // collected map rather than editablePlaylist's
+                            // plain-value reads, and the section appears when
+                            // it lands.
+                            editable = page.type == BrowseType.PLAYLIST &&
+                                signedIn && ownedPlaylistsByAccount[page.browseId] == true,
+                            onRefreshSuggested = {
+                                viewModel.refreshPlaylistRecommendations(page.browseId)
+                            },
                             // Saving is an account action, so it isn't offered to a
                             // guest at all — same as the like and add-to-playlist rows
                             // in the track menu.
@@ -3116,6 +3168,7 @@ private fun BitChordApp(
                             onLoadMore = viewModel::loadMoreHome,
                             loadingMore = homeLoadingMore,
                             recentlyPlayedLoading = homeRecentlyPlayedLoading,
+                            onSurpriseMe = surpriseMe,
                         )
                         TAB_EXPLORE -> selectedMoodGenre?.let { category ->
                             MoodGenrePlaylistsScreen(
@@ -3772,23 +3825,13 @@ private fun BitChordApp(
                                             tint = MaterialTheme.colorScheme.onSurface,
                                         )
                                     }
-                                    DropdownMenu(
+                                    LocalMusicSortMenu(
                                         expanded = librarySortMenuOpen,
-                                        onDismissRequest = { librarySortMenuOpen = false },
-                                    ) {
-                                        LibrarySort.entries.forEach { option ->
-                                            DropdownMenuItem(
-                                                text = { Text(option.localizedLabel()) },
-                                                trailingIcon = if (option == librarySort) {
-                                                    { Icon(Icons.Rounded.Check, contentDescription = null) }
-                                                } else null,
-                                                onClick = {
-                                                    AppSettings.setLibrarySort(option)
-                                                    librarySortMenuOpen = false
-                                                },
-                                            )
-                                        }
-                                    }
+                                        onDismiss = { librarySortMenuOpen = false },
+                                        current = librarySort,
+                                        options = LIBRARY_GRID_SORT_OPTIONS,
+                                        onSelect = AppSettings::setLibrarySort,
+                                    )
                                 }
                             }
                             // Sort, only on an album or playlist page or a device

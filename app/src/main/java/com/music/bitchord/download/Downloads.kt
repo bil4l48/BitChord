@@ -301,6 +301,10 @@ object Downloads {
     suspend fun delete(context: Context, videoId: String): Boolean = withContext(Dispatchers.IO) {
         val uri = _saved.value[videoId]?.toUri() ?: return@withContext false
         val deleted = DownloadStore.delete(context, uri)
+        // The cover is this track's own copy (never shared by another record),
+        // so it dies with the file rather than orphan itself for the storage
+        // page to keep counting.
+        _savedMetadata.value[videoId]?.artworkPath?.let(DownloadArtwork::deletePath)
         forget(videoId)
         deleted
     }
@@ -560,6 +564,10 @@ object Downloads {
             ?.path?.let(::File)?.parentFile
             ?.listFiles()?.firstOrNull { it.nameWithoutExtension == "cover" }
             ?.let(Uri::fromFile)?.toString()
+        // For every other download [artworkPath] is the per-track cover saved
+        // alongside the app's record — a package's sidecar cover and a plain
+        // file's stored cover never coexist, so one of these always answers.
+        val offlineArtwork = savedArtwork ?: artworkPath
         // Either row may be the one that knew the release: a music video is
         // swapped for the catalogue track before this, and it is the catalogue
         // row that usually carries the album — but a search hit tapped directly
@@ -934,7 +942,12 @@ object Downloads {
         // Already there from a previous run the record lost track of — adopt it
         // rather than writing a second copy beside it.
         plan.alreadyAt?.let { uri ->
-            remember(song, track, uri)
+            remember(
+                song,
+                track,
+                uri,
+                artworkPath = DownloadArtwork.path(context, track.videoId),
+            )
             DownloadSession.done(id)
             clear(id)
             return
@@ -970,7 +983,12 @@ object Downloads {
                 val alreadyThere = DownloadStore.existing(context, name)
                 if (alreadyThere != null) {
                     Log.d(TAG, "$name is already in Music; adopting it")
-                    remember(song, track, alreadyThere)
+                    remember(
+                        song,
+                        track,
+                        alreadyThere,
+                        artworkPath = DownloadArtwork.path(context, track.videoId),
+                    )
                     DownloadSession.done(id)
                     clear(id)
                     return@coroutineScope
@@ -1046,6 +1064,17 @@ object Downloads {
             artwork?.cancel()
         }
     }
+
+    /**
+     * The artwork to embed (and, on a finished download, to keep) for [track]:
+     * the cover already saved by an earlier download of the same track where
+     * one exists, otherwise [MediaTagger.artworkFor]'s fetch. Reuse means a
+     * track is fetched from the network for its artwork exactly once — every
+     * later re-download, and every fully-lossless adopt, embeds and reuses the
+     * stored JPEG instead of paying for it again.
+     */
+    private fun coverFor(context: Context, track: Song): MediaTagger.Artwork? =
+        DownloadArtwork.load(context, track.videoId) ?: MediaTagger.artworkFor(track)
 
     /**
      * One resolved download: what to call the file, what to tell the store it

@@ -114,14 +114,6 @@ enum class EqualizerMode {
     MANUAL,
 }
 
-/** Stable persisted ordering for each on-device music library. */
-enum class LocalMusicSort {
-    TITLE_ASC,
-    TITLE_DESC,
-    DATE_ADDED,
-    DATE_MODIFIED,
-}
-
 /**
  * Ordering for the track list on an album or playlist page — the same idea as
  * the Downloads folder's sort, with a date option for the one thing a
@@ -133,7 +125,9 @@ enum class LocalMusicSort {
  */
 enum class SongSort {
     DEFAULT,
+    /** Title, A to Z. */
     TITLE_ASC,
+    /** Title, Z to A. */
     TITLE_DESC,
     DATE_ADDED_ASC,
     DATE_ADDED_DESC,
@@ -401,6 +395,33 @@ object AppSettings {
 
     /** Drops haze blur (status bar, mini player, bottom fade, lyrics focus) for a solid-fill look. */
     val reduceDynamicBlur = MutableStateFlow(false)
+
+    /** Vibrate on taps, skips and the other brief touches described in [com.music.bitchord.ui.haptics.Haptic]. */
+    val hapticFeedback = MutableStateFlow(true)
+
+    /**
+     * How far a mini player swipe must travel to count as a skip. Drives the
+     * threshold the new [com.music.bitchord.ui.components.MiniPlayer] drags use.
+     */
+    val miniPlayerSwipeSensitivity = MutableStateFlow(MiniPlayerSwipeSensitivity.MEDIUM)
+
+    /** The visual style of the player's progress bar — see [PlayerBarStyle]. */
+    val playerBarStyle = MutableStateFlow(PlayerBarStyle.STANDARD)
+
+    /**
+     * Whether the whole app's colours fade towards the playing track's
+     * artwork. Off (the default) keeps the theme's own palette everywhere.
+     */
+    val dynamicTheme = MutableStateFlow(false)
+
+    /** How strongly [dynamicTheme] tints the app — see [DynamicThemeIntensity]. */
+    val dynamicThemeIntensity = MutableStateFlow(DynamicThemeIntensity.BALANCED)
+
+    /**
+     * Which panel the full player was last left on, so reopening it restores
+     * the cover / queue / lyrics view rather than always the cover.
+     */
+    val playerPanel = MutableStateFlow(PlayerPanel.PLAYER)
 
     /** Real backdrop-sampled glass (blur, lens refraction) on the floating nav bar, Android 12+ only. */
     val liquidGlass = MutableStateFlow(false)
@@ -1286,6 +1307,36 @@ object AppSettings {
         prefs.edit().putBoolean(KEY_LIQUID_GLASS, value).apply()
     }
 
+    fun setHapticFeedback(value: Boolean) {
+        hapticFeedback.value = value
+        prefs.edit().putBoolean(KEY_HAPTIC_FEEDBACK, value).apply()
+    }
+
+    fun setMiniPlayerSwipeSensitivity(value: MiniPlayerSwipeSensitivity) {
+        miniPlayerSwipeSensitivity.value = value
+        prefs.edit().putString(KEY_MINI_PLAYER_SWIPE, value.name).apply()
+    }
+
+    fun setPlayerBarStyle(value: PlayerBarStyle) {
+        playerBarStyle.value = value
+        prefs.edit().putString(KEY_PLAYER_BAR_STYLE, value.name).apply()
+    }
+
+    fun setDynamicTheme(value: Boolean) {
+        dynamicTheme.value = value
+        prefs.edit().putBoolean(KEY_DYNAMIC_THEME, value).apply()
+    }
+
+    fun setDynamicThemeIntensity(value: DynamicThemeIntensity) {
+        dynamicThemeIntensity.value = value
+        prefs.edit().putString(KEY_DYNAMIC_THEME_INTENSITY, value.name).apply()
+    }
+
+    fun setPlayerPanel(value: PlayerPanel) {
+        playerPanel.value = value
+        prefs.edit().putString(KEY_PLAYER_PANEL, value.name).apply()
+    }
+
     fun setHighPerformanceMode(value: Boolean) {
         highPerformanceMode.value = value
         if (value) {
@@ -1702,7 +1753,7 @@ object AppSettings {
         prefs.edit().putString(KEY_DOWNLOADED_MUSIC_SORT, value.name).apply()
     }
 
-    fun setLibrarySort(value: LibrarySort) {
+    fun setLibrarySort(value: LocalMusicSort) {
         librarySort.value = value
         prefs.edit().putString(KEY_LIBRARY_SORT, value.name).apply()
     }
@@ -1828,12 +1879,18 @@ object AppSettings {
     private fun readLocalMusicSort(key: String): LocalMusicSort =
         prefs.getString(key, null)
             ?.let { saved -> LocalMusicSort.entries.firstOrNull { it.name == saved } }
-            ?: LocalMusicSort.TITLE_ASC
+            ?: fallback
 
     private fun readLibraryViewType(key: String): LibraryViewType =
         prefs.getString(key, null)
             ?.let { saved -> LibraryViewType.entries.firstOrNull { it.name == saved } }
             ?: LibraryViewType.LIST
+
+    /** Reads one of [MiniPlayerSwipeSensitivity]/[PlayerBarStyle]/[DynamicThemeIntensity]/[PlayerPanel]. */
+    private fun <E : Enum<E>> readEnum(values: Array<E>, key: String, fallback: E): E =
+        prefs.getString(key, null)
+            ?.let { saved -> values.firstOrNull { it.name == saved } }
+            ?: fallback
 
     /**
      * Pins or unpins [browseId], returning whether it is pinned afterwards.
@@ -1851,7 +1908,7 @@ object AppSettings {
             else -> current + browseId
         }
         pinnedPlaylists.value = updated
-        prefs.edit().putString(KEY_PINNED_PLAYLISTS, updated.joinToString(",")).apply()
+        writePinnedPlaylists(updated)
         return browseId in updated
     }
 
@@ -1870,6 +1927,20 @@ object AppSettings {
         val stored = prefs.getString(KEY_PINNED_PLAYLISTS, null) ?: return emptyList()
         return stored.split(",").filter { it.isNotBlank() }
     }
+
+    /** [pinnedPlaylists] on disk — the string a restart reads back. */
+    private fun writePinnedPlaylists(updated: List<String>) {
+        if (!this::prefs.isInitialized) return
+        prefs.edit().putString(KEY_PINNED_PLAYLISTS, encodePinnedPlaylists(updated)).apply()
+    }
+
+    internal fun encodePinnedPlaylists(ids: List<String>): String = ids.joinToString(",")
+
+    internal fun decodePinnedPlaylists(stored: String): List<String> =
+        stored.split(",").filter { it.isNotBlank() }
+
+    private fun readPinnedPlaylists(): List<String> =
+        decodePinnedPlaylists(prefs.getString(KEY_PINNED_PLAYLISTS, null) ?: return emptyList())
 
     /** Forgets the account: token and cached profile. */
     fun clearDiscordAccount() {

@@ -37,6 +37,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -360,12 +362,19 @@ fun MiniPlayer(
     modifier: Modifier = Modifier,
 ) {
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
+    val swipeSensitivity by AppSettings.miniPlayerSwipeSensitivity.collectAsStateWithLifecycle()
     val haptics = rememberHaptics()
     // percent rather than a dp figure, so the corner stays exactly half the
     // height if the row's contents ever change it — which is what keeps a pill
     // a pill instead of a rounded rectangle. Same idiom as [FloatingBottomBar]
     // directly below it, so the two shapes are the same family.
     val shape = RoundedCornerShape(percent = 50)
+    val swipeThreshold = with(LocalDensity.current) { swipeSensitivity.thresholdDp.dp.toPx() }
+    // A whole-bar left/right drag skips in the drawn direction, keyed on the
+    // sensitivity that is the size of the gesture it asks for. Only the drag
+    // matters here: a tap still opens the player through [Modifier.clickable]
+    // below, which never reports a drag, so the two can't fight over a finger.
+    var dragDx by remember { mutableFloatStateOf(0f) }
     Box(
         modifier = modifier
             .padding(horizontal = BAR_GUTTER)
@@ -395,6 +404,26 @@ fun MiniPlayer(
                 },
             )
             .border(0.5.dp, Color.White.copy(alpha = 0.10f), shape)
+            .pointerInput(swipeSensitivity) {
+                detectHorizontalDragGestures(
+                    onDragStart = { dragDx = 0f },
+                    onHorizontalDrag = { _, dragAmount -> dragDx += dragAmount },
+                    onDragEnd = {
+                        when {
+                            dragDx >= swipeThreshold -> {
+                                haptics.play(Haptic.SkipNext)
+                                onNext()
+                            }
+                            dragDx <= -swipeThreshold -> {
+                                haptics.play(Haptic.SkipPrevious)
+                                onPrevious()
+                            }
+                        }
+                        dragDx = 0f
+                    },
+                    onDragCancel = { dragDx = 0f },
+                )
+            }
             // Deliberately silent: the whole bar is the target, so it catches
             // stray taps meant for the page behind it, and the sheet rising is
             // its own confirmation. The glyphs on it still buzz.

@@ -287,6 +287,19 @@ fun DetailScreen(
     onAddSuggested: (Song) -> Unit,
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
+    /**
+     * Whether this page is a playlist the account owns. Only those get the
+     * refreshable "You Might Like" section — it is the only place "Add" can
+     * succeed, because you can only file a track into a playlist you made.
+     * Every other playlist keeps YouTube's static Suggested.
+     */
+    editable: Boolean = false,
+    /**
+     * Builds a fresh "You Might Like" set, replacing the one on show. Only
+     * meaningful when [editable]; a stranger's playlist cannot take an add,
+     * so it is never asked to reshuffle suggestions either.
+     */
+    onRefreshSuggested: () -> Unit = {},
     listState: LazyListState = rememberLazyListState(),
     activeShelf: HomeShelf? = null,
     onActiveShelfChange: (HomeShelf?) -> Unit = {},
@@ -325,9 +338,12 @@ fun DetailScreen(
     onToggleReleaseLibrary: ((String) -> Unit)? = null,
     /**
      * How the track list is ordered — the release's own running order by
-     * default, or alphabetical. Owned by the caller rather than this page
-     * because the control for it lives in the top bar, alongside the account
-     * photo, not in this header.
+     * default, or one of the universal sort criteria (title, date added, most
+     * listened). Owned by the caller rather than this page because the control
+     * for it lives in the top bar, alongside the account photo, not in this
+     * header. Play count sorting reads this device's own listening record; the
+     * date criteria sort off a track's MediaStore timestamp, which only tracks
+     * that came from this device (a downloaded playlist, say) carry.
      */
     songSort: SongSort = SongSort.DEFAULT,
     /**
@@ -771,8 +787,53 @@ fun DetailScreen(
             }
 
             // Tracks YouTube offers to round the playlist out, never folded
-            // into the list above — see [DetailPage.suggestedSongs].
-            if (suggested.isNotEmpty()) {
+            // into the list above — see [DetailPage.suggestedSongs]. On a
+            // playlist the account owns the same rows become "You Might Like":
+            // a Refresh control on the heading, an honest empty state, and the
+            // guarantee that Add can succeed. Anything else — a stranger's
+            // playlist among them — keeps its static Suggested untouched.
+            if (page.type == BrowseType.PLAYLIST && editable) {
+                item(key = "you-might-like-heading") {
+                    YouMightLikeHeading(
+                        palette = palette,
+                        onRefresh = onRefreshSuggested,
+                    )
+                }
+                if (suggested.isNotEmpty()) {
+                    itemsIndexed(
+                        suggested,
+                        key = { _, song -> "you-might-like-${song.videoId}" },
+                    ) { index, song ->
+                        SuggestedSongRow(
+                            song = song,
+                            palette = palette,
+                            onClick = { onSongClick(suggested, index) },
+                            onLongPress = { onSongLongPress(song) },
+                            onAdd = { onAddSuggested(song) },
+                            downloadedTint = downloadedTint,
+                        )
+                        if (index < suggested.lastIndex) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(start = ROW_DIVIDER_INSET),
+                                thickness = 0.5.dp,
+                                color = palette.divider,
+                            )
+                        }
+                    }
+                } else {
+                    item(key = "you-might-like-empty") {
+                        Text(
+                            text = stringResource(R.string.no_recommendations),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = palette.onBackgroundVariant,
+                            modifier = Modifier.padding(
+                                start = PAGE_GUTTER, end = PAGE_GUTTER,
+                                bottom = 8.dp,
+                            ),
+                        )
+                    }
+                }
+            } else if (suggested.isNotEmpty()) {
                 item(key = "suggested-heading") {
                     SectionHeading(stringResource(R.string.suggested), palette)
                 }
@@ -1913,6 +1974,44 @@ private fun SectionHeading(
                 modifier = Modifier
                     .clickable(onClick = onShowAll)
                     .padding(start = 12.dp, top = 4.dp, bottom = 4.dp),
+            )
+        }
+    }
+}
+
+/**
+ * The "You Might Like" heading — the playlist-owner counterpart to
+ * [SectionHeading], with the Refresh control that earns the section its
+ * name: tapping it asks for a fresh set rather than living with the first
+ * one YouTube suggested.
+ */
+@Composable
+private fun YouMightLikeHeading(palette: ArtworkPalette, onRefresh: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = PAGE_GUTTER, end = PAGE_GUTTER, top = 10.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = stringResource(R.string.you_might_like),
+            style = MaterialTheme.typography.headlineMedium,
+            color = palette.onBackground,
+            modifier = Modifier.weight(1f),
+        )
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(palette.accent.copy(alpha = 0.16f))
+                .clickable(onClick = onRefresh),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Rounded.Refresh,
+                contentDescription = stringResource(R.string.refresh_recommendations),
+                tint = palette.accent,
+                modifier = Modifier.size(20.dp),
             )
         }
     }

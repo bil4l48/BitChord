@@ -22,6 +22,7 @@ data class ArtistRef(
 )
 
 /** A playable YouTube Music track. */
+@Serializable
 data class Song(
     val videoId: String,
     val title: String,
@@ -393,6 +394,7 @@ enum class SearchFilter(val label: String, val params: String?) {
 }
 
 /** A card in a home-feed carousel: either a track (videoId) or an album/playlist (browseId). */
+@Serializable
 data class ShelfItem(
     val title: String,
     val subtitle: String,
@@ -438,6 +440,7 @@ data class AccountChannel(
     val key: String get() = pageId ?: dataSyncId ?: name
 }
 
+@Serializable
 data class HomeShelf(
     val title: String,
     val items: List<ShelfItem>,
@@ -502,6 +505,7 @@ data class MoodGenre(
  * Music playlist, the tracks explicitly added to the library, and a shelf per
  * saved collection (playlists, albums, artists, subscriptions, podcasts).
  */
+@Serializable
 data class LibraryPage(
     val likedSongs: List<Song>,
     val librarySongs: List<Song>,
