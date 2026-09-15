@@ -30,10 +30,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.music.bitchord.data.settings.PlayerBarStyle
 
 /**
  * Apple Music's scrubber: a hairline capsule with no thumb knob, which
@@ -59,6 +61,14 @@ fun ThinSlider(
      * unplayed bar so the mix is visible before it arrives.
      */
     transitionWindow: ClosedFloatingPointRange<Float>? = null,
+    /**
+     * Which player-bar look to draw. All five keep the same tap/drag seek
+     * geometry — only the pixels differ ([PlayerBarStyle.STANDARD] capsule,
+     * [PlayerBarStyle.THICK] chunkier capsule, [PlayerBarStyle.WAVY] sine-wave
+     * fill, [PlayerBarStyle.CIRCULAR] bead clusters, [PlayerBarStyle.SIMPLE]
+     * hairline).
+     */
+    style: PlayerBarStyle = PlayerBarStyle.STANDARD,
     idleHeight: Dp = 7.dp,
     activeHeight: Dp = 12.dp,
     activeColor: Color = Color.White.copy(alpha = 0.92f),
@@ -134,11 +144,57 @@ fun ThinSlider(
             }
             val filled = size.width * value.coerceIn(0f, 1f)
             if (filled > 0f && !mixing) {
-                drawRoundRect(
-                    color = activeColor,
-                    size = Size(filled.coerceAtLeast(size.height), size.height),
-                    cornerRadius = radius,
-                )
+                // Style-only difference: the touch handling, the animated
+                // height, and the mixing sheen above are identical for every
+                // skin, so switching styles costs nothing but pixels.
+                when (style) {
+                    PlayerBarStyle.STANDARD, PlayerBarStyle.THICK -> drawRoundRect(
+                        color = activeColor,
+                        size = Size(filled.coerceAtLeast(size.height), size.height),
+                        cornerRadius = radius,
+                    )
+                    // A sine undulation along the played stretch, truncated to
+                    // the capsule so the bar keeps its rounded ends.
+                    PlayerBarStyle.WAVY -> {
+                        val bumps = (filled / size.width * 9f + 1f).toInt().coerceAtLeast(2)
+                        val step = filled / bumps
+                        for (i in 0 until bumps - 1) {
+                            val x0 = i * step
+                            val amp = size.height * 0.32f
+                            val half = step / 2f
+                            drawRoundRect(
+                                color = activeColor,
+                                topLeft = Offset(x0, size.height / 2f - amp),
+                                size = Size(step +
+                                    if (x0 == 0f) size.height else 0f, amp * 2f),
+                                cornerRadius = CornerRadius(size.height / 4f),
+                            )
+                        }
+                    }
+                    // A row of round beads sitting on the track like notes.
+                    PlayerBarStyle.CIRCULAR -> {
+                        val beadCount = (filled / size.width * 14f + 1f).toInt().coerceAtLeast(1)
+                        val gap = size.height * 0.18f
+                        val step = size.width / 14f
+                        for (i in 0 until beadCount) {
+                            val cx = (i + 0.5f) * step
+                            val r = size.height / 2f
+                            drawCircle(
+                                color = activeColor,
+                                radius = r,
+                                center = Offset(cx, size.height / 2f),
+                            )
+                        }
+                    }
+                    // A hairline that only exists where it has been played.
+                    PlayerBarStyle.SIMPLE -> drawLine(
+                        color = activeColor,
+                        start = Offset(size.height / 2f, size.height / 2f),
+                        end = Offset(filled, size.height / 2f),
+                        strokeWidth = size.height * 0.16f,
+                        cap = StrokeCap.Round,
+                    )
+                }
             }
         }
         // Composed only while mixing, rather than drawn conditionally inside the

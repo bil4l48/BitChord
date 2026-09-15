@@ -306,6 +306,14 @@ class PlaybackService : MediaLibraryService() {
     private val transitionFilterB = TransitionFilterProcessor()
 
     /**
+     * One [VolumeBoostAudioProcessor] per player, mirroring the spatial pair
+     * above: the sink's chain cannot share an instance, and both players need
+     * the same level so a crossfade handoff does not change loudness.
+     */
+    private val volumeBoostProcessorA = VolumeBoostAudioProcessor()
+    private val volumeBoostProcessorB = VolumeBoostAudioProcessor()
+
+    /**
      * Whether the format currently arriving at the active player's decoder
      * is Dolby Atmos (E-AC-3 JOC). Widening a JOC stream would fight the
      * object-based mix Dolby already spatializes, so the effect is forced
@@ -1112,8 +1120,8 @@ class PlaybackService : MediaLibraryService() {
             .setLoadErrorHandlingPolicy(PermanentAwareLoadErrorPolicy())
 
         configuredFloatOutput = shouldEnableFloatOutput()
-        val exoPlayer = buildPlayer(spatialAudioProcessorA, transitionFilterA, ownsSession = true)
-        val sparePlayer = buildPlayer(spatialAudioProcessorB, transitionFilterB, ownsSession = false)
+        val exoPlayer = buildPlayer(spatialAudioProcessorA, transitionFilterA, volumeBoostProcessorA, ownsSession = true)
+        val sparePlayer = buildPlayer(spatialAudioProcessorB, transitionFilterB, volumeBoostProcessorB, ownsSession = false)
         player = exoPlayer
         spare = sparePlayer
         // Both sinks feed the same session id, so the system equalizer and any
@@ -1395,9 +1403,10 @@ class PlaybackService : MediaLibraryService() {
     private fun buildPlayer(
         spatial: SpatialAudioProcessor,
         filter: TransitionFilterProcessor,
+        boost: VolumeBoostAudioProcessor,
         ownsSession: Boolean,
     ): ExoPlayer = ExoPlayer.Builder(this)
-        .setRenderersFactory(silenceSkippingRenderers(spatial, filter))
+        .setRenderersFactory(silenceSkippingRenderers(spatial, filter, boost))
         .setMediaSourceFactory(requireNotNull(mediaSourceFactory))
         .setLoadControl(farBufferingLoadControl())
         .setAudioAttributes(AUDIO_ATTRIBUTES, /* handleAudioFocus = */ ownsSession)
@@ -3647,6 +3656,7 @@ class PlaybackService : MediaLibraryService() {
     private fun silenceSkippingRenderers(
         spatial: SpatialAudioProcessor,
         transition: TransitionFilterProcessor,
+        boost: VolumeBoostAudioProcessor,
     ) = object : DefaultRenderersFactory(this) {
         init {
             // Do not force PCM_FLOAT onto an OEM speaker mixer merely because
@@ -3690,7 +3700,9 @@ class PlaybackService : MediaLibraryService() {
                     // Transition filtering last of the two: widening is a
                     // property of the track, and a bass swap that ran before it
                     // would have its own low end fed back in by the crossfeed.
-                    arrayOf(spatial, transition),
+                    // Volume boost runs after both so its gain lands on the
+                    // final mix rather than feeding into their filters.
+                    arrayOf(spatial, transition, boost),
                     SilenceSkippingAudioProcessor(
                         MIN_SILENCE_US,
                         SilenceSkippingAudioProcessor.DEFAULT_SILENCE_RETENTION_RATIO,
@@ -3776,8 +3788,8 @@ class PlaybackService : MediaLibraryService() {
         configuredFloatOutput = enableFloat
         activeFilter = transitionFilterA
         spareFilter = transitionFilterB
-        val newActive = buildPlayer(spatialAudioProcessorA, transitionFilterA, ownsSession = true)
-        val newSpare = buildPlayer(spatialAudioProcessorB, transitionFilterB, ownsSession = false)
+        val newActive = buildPlayer(spatialAudioProcessorA, transitionFilterA, volumeBoostProcessorA, ownsSession = true)
+        val newSpare = buildPlayer(spatialAudioProcessorB, transitionFilterB, volumeBoostProcessorB, ownsSession = false)
         player = newActive
         spare = newSpare
         newSpare.audioSessionId = newActive.audioSessionId
@@ -3868,6 +3880,14 @@ class PlaybackService : MediaLibraryService() {
         scope.launch {
             AppSettings.spatialAudio.collect { applySpatialAudioEnabled() }
         }
+        scope.launch {
+            combine(
+                AppSettings.volumeBoostEnabled,
+                AppSettings.volumeBoostPercent,
+            ) { on, percent -> on to percent }
+                .distinctUntilChanged()
+                .collect { (on, percent) -> applyVolumeBoost(on, percent) }
+        }
     }
 
     /**
@@ -3881,6 +3901,17 @@ class PlaybackService : MediaLibraryService() {
         val enabled = AppSettings.spatialAudio.value && !activeTrackIsDolbyAtmos
         spatialAudioProcessorA.enabled = enabled
         spatialAudioProcessorB.enabled = enabled
+    }
+
+    /**
+     * Applies the Volume Boost setting to both processors, keeping the players
+     * in lockstep so a crossfade handoff doesn't change loudness. Cheap flag
+     * writes: the processor honours them on the very next audio buffer, so the
+     * change is audible immediately even mid-track.
+     */
+    private fun applyVolumeBoost(enabled: Boolean, boostPercent: Int) {
+        volumeBoostProcessorA.setBoost(enabled, boostPercent)
+        volumeBoostProcessorB.setBoost(enabled, boostPercent)
     }
 
     private fun observeScrobbling() {

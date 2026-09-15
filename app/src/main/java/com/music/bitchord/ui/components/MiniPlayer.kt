@@ -5,6 +5,7 @@ import com.music.bitchord.R
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.SkipNext
+import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -25,8 +27,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -117,16 +124,24 @@ fun MiniPlayer(
     hazeState: HazeState,
     onPlayPause: () -> Unit,
     onNext: () -> Unit,
+    onPrevious: () -> Unit = {},
     onExpand: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
+    val swipeSensitivity by AppSettings.miniPlayerSwipeSensitivity.collectAsStateWithLifecycle()
     val haptics = rememberHaptics()
     // percent rather than a dp figure, so the corner stays exactly half the
     // height if the row's contents ever change it — which is what keeps a pill
     // a pill instead of a rounded rectangle. Same idiom as [FloatingBottomBar]
     // directly below it, so the two shapes are the same family.
     val shape = RoundedCornerShape(percent = 50)
+    val swipeThreshold = with(LocalDensity.current) { swipeSensitivity.thresholdDp.dp.toPx() }
+    // A whole-bar left/right drag skips in the drawn direction, keyed on the
+    // sensitivity that is the size of the gesture it asks for. Only the drag
+    // matters here: a tap still opens the player through [Modifier.clickable]
+    // below, which never reports a drag, so the two can't fight over a finger.
+    var dragDx by remember { mutableFloatStateOf(0f) }
     Box(
         modifier = modifier
             .padding(horizontal = PAGE_GUTTER)
@@ -142,6 +157,26 @@ fun MiniPlayer(
                 },
             )
             .border(0.5.dp, Color.White.copy(alpha = 0.10f), shape)
+            .pointerInput(swipeSensitivity) {
+                detectHorizontalDragGestures(
+                    onDragStart = { dragDx = 0f },
+                    onHorizontalDrag = { _, dragAmount -> dragDx += dragAmount },
+                    onDragEnd = {
+                        when {
+                            dragDx >= swipeThreshold -> {
+                                haptics.play(Haptic.SkipNext)
+                                onNext()
+                            }
+                            dragDx <= -swipeThreshold -> {
+                                haptics.play(Haptic.SkipPrevious)
+                                onPrevious()
+                            }
+                        }
+                        dragDx = 0f
+                    },
+                    onDragCancel = { dragDx = 0f },
+                )
+            }
             // Deliberately silent: the whole bar is the target, so it catches
             // stray taps meant for the page behind it, and the sheet rising is
             // its own confirmation. The glyphs on it still buzz.

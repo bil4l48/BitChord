@@ -39,6 +39,7 @@ import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -94,6 +95,8 @@ import com.music.bitchord.data.model.UiState
 import com.music.bitchord.data.model.artworkAt
 import com.music.bitchord.data.model.isSameTrackAs
 import com.music.bitchord.data.settings.AppSettings
+import com.music.bitchord.data.settings.LocalMusicSort
+import com.music.bitchord.data.stats.ListeningStats
 import com.music.bitchord.ui.components.ArtworkWash
 import com.music.bitchord.ui.components.DownloadedBadge
 import com.music.bitchord.ui.components.ExplicitSongTitle
@@ -114,18 +117,6 @@ import com.music.bitchord.ui.components.optimizedHazeEffect
 import com.music.bitchord.ui.theme.rememberArtworkPalette
 import kotlin.math.roundToInt
 import java.util.Locale
-
-/**
- * Ordering for the track list on an album or playlist page — the same idea as
- * the Downloads folder's sort, but without a date: a catalogue row carries
- * none, so [DEFAULT] (the release's own running order) is the only option
- * that isn't alphabetical.
- */
-enum class SongSort {
-    DEFAULT,
-    TITLE_ASC,
-    TITLE_DESC,
-}
 
 private const val MAX_ARTIST_SONGS = 20
 private const val SONGS_PER_COLUMN = 4
@@ -202,6 +193,19 @@ fun DetailScreen(
     onAddSuggested: (Song) -> Unit,
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
+    /**
+     * Whether this page is a playlist the account owns. Only those get the
+     * refreshable "You Might Like" section — it is the only place "Add" can
+     * succeed, because you can only file a track into a playlist you made.
+     * Every other playlist keeps YouTube's static Suggested.
+     */
+    editable: Boolean = false,
+    /**
+     * Builds a fresh "You Might Like" set, replacing the one on show. Only
+     * meaningful when [editable]; a stranger's playlist cannot take an add,
+     * so it is never asked to reshuffle suggestions either.
+     */
+    onRefreshSuggested: () -> Unit = {},
     listState: LazyListState = rememberLazyListState(),
     /**
      * Holding one of the album cards on an artist page — the same menu the
@@ -233,14 +237,21 @@ fun DetailScreen(
     onToggleSubscription: (() -> Unit)? = null,
     /**
      * How the track list is ordered — the release's own running order by
-     * default, or alphabetical. Owned by the caller rather than this page
-     * because the control for it lives in the top bar, alongside the account
-     * photo, not in this header.
+     * default, or one of the universal sort criteria (title, date added, most
+     * listened). Owned by the caller rather than this page because the control
+     * for it lives in the top bar, alongside the account photo, not in this
+     * header. Play count sorting reads this device's own listening record; the
+     * date criteria sort off a track's MediaStore timestamp, which only tracks
+     * that came from this device (a downloaded playlist, say) carry.
      */
-    songSort: SongSort = SongSort.DEFAULT,
+    songSort: LocalMusicSort = LocalMusicSort.DEFAULT,
 ) {
     val rawSongs = (page.songs as? UiState.Success)?.data.orEmpty()
-    val songs = remember(rawSongs, songSort) { rawSongs.sortedForDetail(songSort) }
+    // The device's own play counts drive the most/least-listened criteria and
+    // are loaded once per visit, the same as the Local Music folders.
+    var playCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    LaunchedEffect(Unit) { playCounts = ListeningStats.playCounts() }
+    val songs = remember(rawSongs, songSort, playCounts) { rawSongs.sortedForLibrary(songSort, playCounts) }
     // What a numbered row shows regardless of [songSort] — an album's track
     // numbers are the sleeve's own and must not relabel themselves to match
     // wherever a sort put the row.
@@ -519,8 +530,53 @@ fun DetailScreen(
             }
 
             // Tracks YouTube offers to round the playlist out, never folded
-            // into the list above — see [DetailPage.suggestedSongs].
-            if (suggested.isNotEmpty()) {
+            // into the list above — see [DetailPage.suggestedSongs]. On a
+            // playlist the account owns the same rows become "You Might Like":
+            // a Refresh control on the heading, an honest empty state, and the
+            // guarantee that Add can succeed. Anything else — a stranger's
+            // playlist among them — keeps its static Suggested untouched.
+            if (page.type == BrowseType.PLAYLIST && editable) {
+                item(key = "you-might-like-heading") {
+                    YouMightLikeHeading(
+                        palette = palette,
+                        onRefresh = onRefreshSuggested,
+                    )
+                }
+                if (suggested.isNotEmpty()) {
+                    itemsIndexed(
+                        suggested,
+                        key = { _, song -> "you-might-like-${song.videoId}" },
+                    ) { index, song ->
+                        SuggestedSongRow(
+                            song = song,
+                            palette = palette,
+                            onClick = { onSongClick(suggested, index) },
+                            onLongPress = { onSongLongPress(song) },
+                            onAdd = { onAddSuggested(song) },
+                            downloadedTint = downloadedTint,
+                        )
+                        if (index < suggested.lastIndex) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(start = ROW_DIVIDER_INSET),
+                                thickness = 0.5.dp,
+                                color = palette.divider,
+                            )
+                        }
+                    }
+                } else {
+                    item(key = "you-might-like-empty") {
+                        Text(
+                            text = stringResource(R.string.no_recommendations),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = palette.onBackgroundVariant,
+                            modifier = Modifier.padding(
+                                start = PAGE_GUTTER, end = PAGE_GUTTER,
+                                bottom = 8.dp,
+                            ),
+                        )
+                    }
+                }
+            } else if (suggested.isNotEmpty()) {
                 item(key = "suggested-heading") {
                     SectionHeading(stringResource(R.string.suggested), palette)
                 }
@@ -838,12 +894,6 @@ private fun DetailSearchField(
             )
         }
     }
-}
-
-private fun List<Song>.sortedForDetail(sort: SongSort): List<Song> = when (sort) {
-    SongSort.DEFAULT -> this
-    SongSort.TITLE_ASC -> sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title })
-    SongSort.TITLE_DESC -> sortedWith(compareByDescending(String.CASE_INSENSITIVE_ORDER) { it.title })
 }
 
 /**
@@ -1351,6 +1401,44 @@ private fun SectionHeading(title: String, palette: ArtworkPalette) {
             start = PAGE_GUTTER, end = PAGE_GUTTER, top = 10.dp, bottom = 8.dp,
         ),
     )
+}
+
+/**
+ * The "You Might Like" heading — the playlist-owner counterpart to
+ * [SectionHeading], with the Refresh control that earns the section its
+ * name: tapping it asks for a fresh set rather than living with the first
+ * one YouTube suggested.
+ */
+@Composable
+private fun YouMightLikeHeading(palette: ArtworkPalette, onRefresh: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = PAGE_GUTTER, end = PAGE_GUTTER, top = 10.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = stringResource(R.string.you_might_like),
+            style = MaterialTheme.typography.headlineMedium,
+            color = palette.onBackground,
+            modifier = Modifier.weight(1f),
+        )
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(palette.accent.copy(alpha = 0.16f))
+                .clickable(onClick = onRefresh),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Rounded.Refresh,
+                contentDescription = stringResource(R.string.refresh_recommendations),
+                tint = palette.accent,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
 }
 
 /** Compact row used inside the artist song grid; no swipe, to keep the

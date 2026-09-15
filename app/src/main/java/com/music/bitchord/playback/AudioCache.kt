@@ -235,6 +235,60 @@ object AudioCache {
         }
     }
 
+    /** Total bytes the streaming cache currently holds on disk. */
+    fun usedBytes(): Long {
+        if (!::cache.isInitialized) return 0L
+        return runCatching { cache.getCacheSpace() }.getOrDefault(0L)
+    }
+
+    /**
+     * The YouTube recordings this cache holds in full, one id each.
+     *
+     * What Cached Music reads to list every track that has made it whole onto
+     * the device without ever being downloaded: a fully fetched track is a
+     * local copy, and saying so is the feature. If that page is the only
+     * reader, this stays read-only — it must never warm or trim anything, or
+     * merely visiting it would start and stop the network.
+     *
+     * Complete means contiguous from byte zero to the recorded content length,
+     * the same measure [isFullyCached] stands on: a rendition with a tail
+     * still coming in has holes the decoder would stop at, and listing it
+     * would promise playback a byte range the cache cannot calmly answer
+     * offline. Each cache entry is judged against its own content metadata
+     * rather than through [isFullyCached], which rebuilds the key under the
+     * *current* substitution state — an entry stored under `#alt` or a
+     * rendition tag would be measured against the plain key's length.
+     *
+     * A recording may own several entries — the Opus stream, a substituted
+     * source's copy (`#alt`), a quality upgrade (`#<rendition>`); see
+     * [keyFactory] — and any complete one makes [videoId] worth listing, so
+     * the id is reported once regardless. Non-YouTube keys (a source-backed
+     * track, a raw uri spec) are skipped: a cache-only track can only be drawn
+     * with the metadata that names it, and nothing in this object holds that
+     * for a recording that is not a YouTube id.
+     */
+    fun fullyCachedVideoIds(): List<String> {
+        if (!::cache.isInitialized) return emptyList()
+        val done = LinkedHashSet<String>()
+        for (key in cache.keys) {
+            val videoId = key.substringBefore('#')
+            if (!isYouTubeVideoId(videoId)) continue
+            val length = ContentMetadata
+                .getContentLength(cache.getContentMetadata(key))
+                .coerceAtLeast(0L)
+            if (length <= 0) continue
+            val contiguous = cache.getCachedLength(key, 0, length).coerceAtLeast(0L)
+            if (contiguous >= length) done.add(videoId)
+        }
+        return done.toList()
+    }
+
+    /** A YouTube recording id: 11 characters of `[A-Za-z0-9_-]`. */
+    private fun isYouTubeVideoId(id: String): Boolean =
+        id.length == 11 && id.all { it in YT_ID_CHARS }
+
+    private const val YT_ID_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+
     /**
      * Throws away everything held for the track [uri] plays, so the next open
      * fetches it again from the top.

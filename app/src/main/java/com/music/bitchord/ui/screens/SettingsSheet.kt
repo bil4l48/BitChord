@@ -29,6 +29,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Notes
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Animation
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.AutoAwesome
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.DataUsage
 import androidx.compose.material.icons.rounded.FileDownload
 import androidx.compose.material.icons.rounded.FileUpload
 import androidx.compose.material.icons.rounded.FilterAlt
@@ -162,6 +164,7 @@ fun SettingsScreen(
     onSources: () -> Unit,
     onSpotifyCanvasAuth: () -> Unit,
     onAppLanguage: () -> Unit,
+    onOpenStorage: () -> Unit,
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
 ) {
@@ -180,6 +183,8 @@ fun SettingsScreen(
     // which caches the codec-list walk for the life of the process.
     val dolbyAtmosSupported = DeviceCodecs.playsDolbyAtmos
     val spatialAudio by AppSettings.spatialAudio.collectAsStateWithLifecycle()
+    val volumeBoostEnabled by AppSettings.volumeBoostEnabled.collectAsStateWithLifecycle()
+    val volumeBoostPercent by AppSettings.volumeBoostPercent.collectAsStateWithLifecycle()
     val nerdStats by AppSettings.showNerdStats.collectAsStateWithLifecycle()
     val reduceAnimation by AppSettings.reduceAnimation.collectAsStateWithLifecycle()
     val reduceDynamicBlur by AppSettings.reduceDynamicBlur.collectAsStateWithLifecycle()
@@ -544,6 +549,39 @@ fun SettingsScreen(
             )
             RowDivider()
             SettingsRow(
+                icon = Icons.AutoMirrored.Rounded.VolumeUp,
+                title = stringResource(R.string.volume_boost),
+                subtitle = stringResource(R.string.volume_boost_subtitle),
+                trailing = {
+                    Switch(
+                        checked = volumeBoostEnabled,
+                        onCheckedChange = AppSettings::setVolumeBoostEnabled,
+                        colors = SwitchDefaults.colors(
+                            checkedTrackColor = MaterialTheme.colorScheme.primary,
+                            checkedBorderColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    )
+                },
+                onClick = { AppSettings.setVolumeBoostEnabled(!volumeBoostEnabled) },
+            )
+            if (volumeBoostEnabled) {
+                SliderRow(
+                    icon = Icons.AutoMirrored.Rounded.VolumeUp,
+                    title = stringResource(R.string.volume_boost_level),
+                    subtitle = stringResource(R.string.volume_boost_level_subtitle),
+                    value = if (volumeBoostPercent > 100) {
+                        stringResource(R.string.volume_boost_level_value, volumeBoostPercent)
+                    } else {
+                        "100%"
+                    },
+                    sliderValue = volumeBoostPercent.toFloat(),
+                    onSliderValue = { AppSettings.setVolumeBoostPercent(it.roundToInt()) },
+                    valueRange = 100f..AppSettings.MAX_VOLUME_BOOST_PERCENT.toFloat(),
+                    steps = 7,
+                )
+            }
+            RowDivider()
+            SettingsRow(
                 icon = Icons.Rounded.Tune,
                 title = stringResource(R.string.equalizer),
                 subtitle = stringResource(R.string.equalizer_subtitle),
@@ -849,6 +887,13 @@ fun SettingsScreen(
 
         val cacheLimitMb = (cacheLimitBytes / (1024 * 1024)).toInt()
         SettingsGroup(header = stringResource(R.string.storage)) {
+            SettingsRow(
+                icon = Icons.Rounded.DataUsage,
+                title = stringResource(R.string.storage_and_cache),
+                subtitle = stringResource(R.string.storage_total_subtitle),
+                onClick = onOpenStorage,
+            )
+            RowDivider()
             SliderRow(
                 icon = Icons.Rounded.Storage,
                 title = stringResource(R.string.song_cache_limit),

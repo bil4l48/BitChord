@@ -121,6 +121,63 @@ enum class ThemeMode(val label: String) {
     SYSTEM("System"), LIGHT("Light"), DARK("Dark")
 }
 
+/**
+ * How hard it is to swipe the mini player to the previous or next track.
+ *
+ * The threshold is the distance a whole-bar left/right drag has to travel
+ * before it counts. A low sensitivity wants a long, deliberate drag so an
+ * idle thumb rolling across the bar doesn't skip tracks; a high one lets a
+ * short flick do it.
+ */
+enum class MiniPlayerSwipeSensitivity(val label: String, val thresholdDp: Float) {
+    LOW("Low", 140f),
+    MEDIUM("Medium", 90f),
+    HIGH("High", 50f),
+}
+
+/**
+ * The look of the player's progress bar.
+ *
+ * Only the progress bar carries a style; the volume slider keeps its calm
+ * default so the two are never confused. It changes nothing about how the
+ * bar behaves — tap and drag still scan, exactly as [ThinSlider] has always done.
+ */
+enum class PlayerBarStyle(val label: String) {
+    /** The default hairline capsule that stands in for a scrubber. */
+    STANDARD("Standard"),
+    /** The progress reads as a wave cresting towards the playhead. */
+    WAVY("Wavy"),
+    /** A chunkier capsule — the same shape, easier to see at a glance. */
+    THICK("Thick"),
+    /** The track is a run of round beads, filled up to the playhead. */
+    CIRCULAR("Circular"),
+    /** A hairline with a squared-off, quieter look — no capsule thickening. */
+    SIMPLE("Simple"),
+}
+
+/**
+ * How strongly [AppSettings.dynamicTheme] pulls the app's colours from the
+ * playing track's artwork.
+ */
+enum class DynamicThemeIntensity(val label: String) {
+    /** A nudge of the artwork's hue behind the app's usual accent. */
+    SUBTLE("Subtle"),
+    /** The artwork's colour leads, still holding the theme's own shades. */
+    BALANCED("Balanced"),
+    /** Almost the raw artwork colour, tinting backgrounds as well. */
+    STRONG("Strong"),
+}
+
+/**
+ * The panel the player was last showing, so reopening it can pick up where
+ * the tracker left off rather than always dropping back to the cover art.
+ */
+enum class PlayerPanel {
+    PLAYER,
+    QUEUE,
+    LYRICS,
+}
+
 /** CPU budget for Automix's background analysis, not its audible mix algorithm. */
 enum class AutomixPerformanceMode(val inferenceThreads: Int) {
     EFFICIENT(1),
@@ -128,24 +185,39 @@ enum class AutomixPerformanceMode(val inferenceThreads: Int) {
     PERFORMANCE(4),
 }
 
-/** Stable persisted ordering for each on-device music library. */
-enum class LocalMusicSort {
-    TITLE_ASC,
-    TITLE_DESC,
-    DATE_ADDED,
-    DATE_MODIFIED,
-}
-
 /**
- * Stable persisted ordering for a Library "Show all" grid — playlists or
- * albums. A card there only ever carries a title, so unlike [LocalMusicSort]
- * there is nothing date-based to offer.
+ * Stable persisted ordering behind every sortable collection the app shows.
+ *
+ * One enum and one sort renderer for the whole app — the device folders, the
+ * Artists and Albums groupings inside them, album/playlist pages, and the
+ * Library's "Show all" grids all read from this same set. [DEFAULT] keeps a
+ * collection's own natural order (an album's running order, a shelf's arrival
+ * order); the rest reorder by what every track in the list carries or can be
+ * looked up by (title, MediaStore timestamps, this device's play counts).
+ *
+ * Entries keep their original names — a mode the UI gained must not silently
+ * reset the setting of an install that picked it before the addition. Newer
+ * entries (the play-count and both date directions) are additions on top, and
+ * [DEFAULT] reuses the name the Library grid already persisted so its old
+ * value survives the merge.
  */
-enum class LibrarySort {
-    /** Whatever order the shelf itself arrived in — YouTube Music's own. */
+enum class LocalMusicSort {
+    /** The collection's own order — an album's running order, a shelf's own. */
     DEFAULT,
+    /** Title, A to Z. */
     TITLE_ASC,
+    /** Title, Z to A. */
     TITLE_DESC,
+    /** Added to the device, newest first. */
+    DATE_ADDED,
+    /** Added to the device, oldest first. */
+    DATE_ADDED_OLDEST,
+    /** Changed on the device, newest first. */
+    DATE_MODIFIED,
+    /** Most whole plays first, per this device's own listening record. */
+    PLAYS_MOST,
+    /** Least whole plays first — tracks never played come out on top. */
+    PLAYS_LEAST,
 }
 
 /** Display mode for music lists: compact rows or grid cards. */
@@ -286,6 +358,18 @@ object AppSettings {
      * us a stereo stream, so there's no Atmos-style source to render.
      */
     val spatialAudio = MutableStateFlow(false)
+
+    /**
+     * Lets the in-app audio level exceed the normal 100% by scaling the decoded
+     * PCM inside the player's pipeline — see
+     * [com.music.bitchord.playback.VolumeBoostAudioProcessor]. When off, or at
+     * 100%, the audio is untouched. The system stream volume keeps working
+     * normally either way.
+     */
+    val volumeBoostEnabled = MutableStateFlow(false)
+
+    /** The boost level, 100..500 percent (100 = no boost). */
+    val volumeBoostPercent = MutableStateFlow(DEFAULT_VOLUME_BOOST_PERCENT)
     val playbackSpeed = MutableStateFlow(1.0f)
     val themeMode = MutableStateFlow(ThemeMode.DARK)
 
@@ -324,6 +408,33 @@ object AppSettings {
 
     /** Drops haze blur (status bar, mini player, bottom fade, lyrics focus) for a solid-fill look. */
     val reduceDynamicBlur = MutableStateFlow(false)
+
+    /** Vibrate on taps, skips and the other brief touches described in [com.music.bitchord.ui.haptics.Haptic]. */
+    val hapticFeedback = MutableStateFlow(true)
+
+    /**
+     * How far a mini player swipe must travel to count as a skip. Drives the
+     * threshold the new [com.music.bitchord.ui.components.MiniPlayer] drags use.
+     */
+    val miniPlayerSwipeSensitivity = MutableStateFlow(MiniPlayerSwipeSensitivity.MEDIUM)
+
+    /** The visual style of the player's progress bar — see [PlayerBarStyle]. */
+    val playerBarStyle = MutableStateFlow(PlayerBarStyle.STANDARD)
+
+    /**
+     * Whether the whole app's colours fade towards the playing track's
+     * artwork. Off (the default) keeps the theme's own palette everywhere.
+     */
+    val dynamicTheme = MutableStateFlow(false)
+
+    /** How strongly [dynamicTheme] tints the app — see [DynamicThemeIntensity]. */
+    val dynamicThemeIntensity = MutableStateFlow(DynamicThemeIntensity.BALANCED)
+
+    /**
+     * Which panel the full player was last left on, so reopening it restores
+     * the cover / queue / lyrics view rather than always the cover.
+     */
+    val playerPanel = MutableStateFlow(PlayerPanel.PLAYER)
 
     /** Real backdrop-sampled glass (blur, lens refraction) on the floating nav bar, Android 12+ only. */
     val liquidGlass = MutableStateFlow(false)
@@ -448,7 +559,7 @@ object AppSettings {
     val downloadedMusicSort = MutableStateFlow(LocalMusicSort.TITLE_ASC)
     val localMusicViewType = MutableStateFlow(LibraryViewType.LIST)
     val downloadedMusicViewType = MutableStateFlow(LibraryViewType.LIST)
-    val librarySort = MutableStateFlow(LibrarySort.DEFAULT)
+    val librarySort = MutableStateFlow(LocalMusicSort.DEFAULT)
 
     /** Empty means every MediaStore folder; otherwise this is a persisted SAF tree URI. */
     val localMusicFolderUri = MutableStateFlow("")
@@ -632,6 +743,10 @@ object AppSettings {
         preferUsbDac.value = prefs.getBoolean(KEY_PREFER_USB_DAC, false)
         dolbyAtmos.value = prefs.getBoolean(KEY_DOLBY_ATMOS, true)
         spatialAudio.value = prefs.getBoolean(KEY_SPATIAL_AUDIO, false)
+        volumeBoostEnabled.value = prefs.getBoolean(KEY_VOLUME_BOOST_ENABLED, false)
+        volumeBoostPercent.value = prefs
+            .getInt(KEY_VOLUME_BOOST, DEFAULT_VOLUME_BOOST_PERCENT)
+            .coerceIn(100, MAX_VOLUME_BOOST_PERCENT)
         playbackSpeed.value = prefs.getFloat(KEY_SPEED, 1.0f)
         themeMode.value = runCatching {
             ThemeMode.valueOf(prefs.getString(KEY_THEME, null) ?: "DARK")
@@ -652,6 +767,11 @@ object AppSettings {
         reduceDynamicBlur.value = prefs.getBoolean(KEY_REDUCE_BLUR, false)
         liquidGlass.value = prefs.getBoolean(KEY_LIQUID_GLASS, false)
         lyricsBlur.value = prefs.getBoolean(KEY_LYRICS_BLUR, true)
+        hapticFeedback.value = prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true)
+        miniPlayerSwipeSensitivity.value = readEnum(enumValues<MiniPlayerSwipeSensitivity>(), KEY_MINI_PLAYER_SWIPE, MiniPlayerSwipeSensitivity.MEDIUM)
+        playerBarStyle.value = readEnum(enumValues<PlayerBarStyle>(), KEY_PLAYER_BAR_STYLE, PlayerBarStyle.STANDARD)
+        dynamicThemeIntensity.value = readEnum(enumValues<DynamicThemeIntensity>(), KEY_DYNAMIC_THEME_INTENSITY, DynamicThemeIntensity.BALANCED)
+        playerPanel.value = readEnum(enumValues<PlayerPanel>(), KEY_PLAYER_PANEL, PlayerPanel.PLAYER)
         if (highPerformanceMode.value) {
             reduceAnimation.value = false
             reduceDynamicBlur.value = false
@@ -689,9 +809,7 @@ object AppSettings {
         downloadedMusicSort.value = readLocalMusicSort(KEY_DOWNLOADED_MUSIC_SORT)
         localMusicViewType.value = readLibraryViewType(KEY_LOCAL_MUSIC_VIEW_TYPE)
         downloadedMusicViewType.value = readLibraryViewType(KEY_DOWNLOADED_MUSIC_VIEW_TYPE)
-        librarySort.value = prefs.getString(KEY_LIBRARY_SORT, null)
-            ?.let { saved -> LibrarySort.entries.firstOrNull { it.name == saved } }
-            ?: LibrarySort.DEFAULT
+        librarySort.value = readLocalMusicSort(KEY_LIBRARY_SORT, LocalMusicSort.DEFAULT)
         localMusicFolderUri.value = prefs.getString(KEY_LOCAL_MUSIC_FOLDER_URI, "").orEmpty()
         pinnedPlaylists.value = readPinnedPlaylists()
         discordToken.value = authStore.discordToken.orEmpty()
@@ -872,6 +990,17 @@ object AppSettings {
         prefs.edit().putBoolean(KEY_SPATIAL_AUDIO, value).apply()
     }
 
+    fun setVolumeBoostEnabled(value: Boolean) {
+        volumeBoostEnabled.value = value
+        prefs.edit().putBoolean(KEY_VOLUME_BOOST_ENABLED, value).apply()
+    }
+
+    fun setVolumeBoostPercent(value: Int) {
+        val clamped = value.coerceIn(100, MAX_VOLUME_BOOST_PERCENT)
+        volumeBoostPercent.value = clamped
+        prefs.edit().putInt(KEY_VOLUME_BOOST, clamped).apply()
+    }
+
     fun setPlaybackSpeed(value: Float) {
         playbackSpeed.value = value
         prefs.edit().putFloat(KEY_SPEED, value).apply()
@@ -926,6 +1055,36 @@ object AppSettings {
     fun setLiquidGlass(value: Boolean) {
         liquidGlass.value = value
         prefs.edit().putBoolean(KEY_LIQUID_GLASS, value).apply()
+    }
+
+    fun setHapticFeedback(value: Boolean) {
+        hapticFeedback.value = value
+        prefs.edit().putBoolean(KEY_HAPTIC_FEEDBACK, value).apply()
+    }
+
+    fun setMiniPlayerSwipeSensitivity(value: MiniPlayerSwipeSensitivity) {
+        miniPlayerSwipeSensitivity.value = value
+        prefs.edit().putString(KEY_MINI_PLAYER_SWIPE, value.name).apply()
+    }
+
+    fun setPlayerBarStyle(value: PlayerBarStyle) {
+        playerBarStyle.value = value
+        prefs.edit().putString(KEY_PLAYER_BAR_STYLE, value.name).apply()
+    }
+
+    fun setDynamicTheme(value: Boolean) {
+        dynamicTheme.value = value
+        prefs.edit().putBoolean(KEY_DYNAMIC_THEME, value).apply()
+    }
+
+    fun setDynamicThemeIntensity(value: DynamicThemeIntensity) {
+        dynamicThemeIntensity.value = value
+        prefs.edit().putString(KEY_DYNAMIC_THEME_INTENSITY, value.name).apply()
+    }
+
+    fun setPlayerPanel(value: PlayerPanel) {
+        playerPanel.value = value
+        prefs.edit().putString(KEY_PLAYER_PANEL, value.name).apply()
     }
 
     fun setHighPerformanceMode(value: Boolean) {
@@ -1238,7 +1397,7 @@ object AppSettings {
         prefs.edit().putString(KEY_DOWNLOADED_MUSIC_SORT, value.name).apply()
     }
 
-    fun setLibrarySort(value: LibrarySort) {
+    fun setLibrarySort(value: LocalMusicSort) {
         librarySort.value = value
         prefs.edit().putString(KEY_LIBRARY_SORT, value.name).apply()
     }
@@ -1258,15 +1417,21 @@ object AppSettings {
         prefs.edit().putString(KEY_LOCAL_MUSIC_FOLDER_URI, value).apply()
     }
 
-    private fun readLocalMusicSort(key: String): LocalMusicSort =
+    private fun readLocalMusicSort(key: String, fallback: LocalMusicSort = LocalMusicSort.TITLE_ASC): LocalMusicSort =
         prefs.getString(key, null)
             ?.let { saved -> LocalMusicSort.entries.firstOrNull { it.name == saved } }
-            ?: LocalMusicSort.TITLE_ASC
+            ?: fallback
 
     private fun readLibraryViewType(key: String): LibraryViewType =
         prefs.getString(key, null)
             ?.let { saved -> LibraryViewType.entries.firstOrNull { it.name == saved } }
             ?: LibraryViewType.LIST
+
+    /** Reads one of [MiniPlayerSwipeSensitivity]/[PlayerBarStyle]/[DynamicThemeIntensity]/[PlayerPanel]. */
+    private fun <E : Enum<E>> readEnum(values: Array<E>, key: String, fallback: E): E =
+        prefs.getString(key, null)
+            ?.let { saved -> values.firstOrNull { it.name == saved } }
+            ?: fallback
 
     /**
      * Pins or unpins [browseId], returning whether it is pinned afterwards.
@@ -1284,14 +1449,37 @@ object AppSettings {
             else -> current + browseId
         }
         pinnedPlaylists.value = updated
-        prefs.edit().putString(KEY_PINNED_PLAYLISTS, updated.joinToString(",")).apply()
+        writePinnedPlaylists(updated)
         return browseId in updated
     }
 
-    private fun readPinnedPlaylists(): List<String> {
-        val stored = prefs.getString(KEY_PINNED_PLAYLISTS, null) ?: return emptyList()
-        return stored.split(",").filter { it.isNotBlank() }
+    /**
+     * Forgets [ids] from [pinnedPlaylists] if they are there — for a pinned
+     * playlist that has ceased to exist in the library (deleted here or in
+     * another client), where keeping the id would leave a pin pointing at
+     * nothing. Unpinning never fails and never evicts: it only ever removes.
+     */
+    fun unpinPlaylists(ids: Collection<String>) {
+        val toDrop = ids.filterTo(hashSetOf()) { it in pinnedPlaylists.value }
+        if (toDrop.isEmpty()) return
+        val updated = pinnedPlaylists.value.filterNot { it in toDrop }
+        pinnedPlaylists.value = updated
+        writePinnedPlaylists(updated)
     }
+
+    /** [pinnedPlaylists] on disk — the string a restart reads back. */
+    private fun writePinnedPlaylists(updated: List<String>) {
+        if (!this::prefs.isInitialized) return
+        prefs.edit().putString(KEY_PINNED_PLAYLISTS, encodePinnedPlaylists(updated)).apply()
+    }
+
+    internal fun encodePinnedPlaylists(ids: List<String>): String = ids.joinToString(",")
+
+    internal fun decodePinnedPlaylists(stored: String): List<String> =
+        stored.split(",").filter { it.isNotBlank() }
+
+    private fun readPinnedPlaylists(): List<String> =
+        decodePinnedPlaylists(prefs.getString(KEY_PINNED_PLAYLISTS, null) ?: return emptyList())
 
     /** Forgets the account: token and cached profile. */
     fun clearDiscordAccount() {
@@ -1387,6 +1575,12 @@ object AppSettings {
     const val DEFAULT_CACHE_LIMIT_BYTES = 512L * 1024 * 1024
     const val MAX_CACHE_LIMIT_BYTES = 10L * 1024 * 1024 * 1024
 
+    /** When Volume Boost is switched on for the first time. 200% is audible but sane. */
+    const val DEFAULT_VOLUME_BOOST_PERCENT = 200
+
+    /** The ceiling the boost slider offers and the processor clamps to. */
+    const val MAX_VOLUME_BOOST_PERCENT = 500
+
     private const val DEFAULT_PERFORMANCE_REFRESH_RATE = 120
 
     private fun normalizePerformanceRefreshRate(value: Int): Int =
@@ -1407,6 +1601,8 @@ object AppSettings {
     private const val KEY_PREFER_USB_DAC = "prefer_usb_dac"
     private const val KEY_DOLBY_ATMOS = "dolby_atmos"
     private const val KEY_SPATIAL_AUDIO = "spatial_audio"
+    private const val KEY_VOLUME_BOOST_ENABLED = "volume_boost_enabled"
+    private const val KEY_VOLUME_BOOST = "volume_boost_percent"
     private const val KEY_SPEED = "playback_speed"
     private const val KEY_THEME = "theme_mode"
     private const val KEY_AUTOPLAY = "autoplay"
@@ -1424,6 +1620,12 @@ object AppSettings {
     private const val KEY_REDUCE_BLUR = "reduce_dynamic_blur"
     private const val KEY_LIQUID_GLASS = "liquid_glass"
     private const val KEY_LYRICS_BLUR = "lyrics_blur"
+    private const val KEY_HAPTIC_FEEDBACK = "haptic_feedback"
+    private const val KEY_MINI_PLAYER_SWIPE = "mini_player_swipe_sensitivity"
+    private const val KEY_PLAYER_BAR_STYLE = "player_bar_style"
+    private const val KEY_DYNAMIC_THEME = "dynamic_theme"
+    private const val KEY_DYNAMIC_THEME_INTENSITY = "dynamic_theme_intensity"
+    private const val KEY_PLAYER_PANEL = "player_panel"
     private const val KEY_ANIMATED_CANVAS = "animated_canvas"
     private const val KEY_CANVAS_OVER_CELLULAR = "canvas_over_cellular"
     private const val KEY_FULL_BLEED_ARTWORK = "full_bleed_artwork"

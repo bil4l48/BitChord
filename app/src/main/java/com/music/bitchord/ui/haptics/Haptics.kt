@@ -13,6 +13,7 @@ import androidx.annotation.RequiresApi
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
+import com.music.bitchord.data.settings.AppSettings
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -70,6 +71,11 @@ class Haptics internal constructor(context: Context) {
     private val app = context.applicationContext
 
     fun play(haptic: Haptic) {
+        // The app's own "Haptic Feedback" switch folds in here, above the
+        // system-wide touch-feedback one that [HapticDevice] already honours —
+        // one gate covers every buzz in the app, including the new mini player
+        // swipes. Read live so the flutter is gone the moment the switch is.
+        if (!AppSettings.hapticFeedback.value) return
         HapticDevice.of(app)?.play(haptic)
     }
 }

@@ -97,6 +97,12 @@ fun HomeScreen(
     onLoadMore: (() -> Unit)? = null,
     loadingMore: Boolean = false,
     recentlyPlayedLoading: Boolean = false,
+    /**
+     * Starts a "Surprise Me" mix — roughly half the tracks the listener
+     * already knows, half discovery inside their listening turf. Only present
+     * when the caller can build one, hence nullable.
+     */
+    onSurpriseMe: (() -> Unit)? = null,
 ) {
     PullToRefresh(
         refreshing = refreshing,
@@ -128,6 +134,14 @@ fun HomeScreen(
                     MessageState(state.message, actionLabel = stringResource(R.string.retry), onAction = onRetry)
                 }
                 is UiState.Success -> {
+                    if (onSurpriseMe != null) {
+                        item(key = "surprise_me") {
+                            SurpriseMeRow(
+                                onClick = onSurpriseMe,
+                                modifier = Modifier.padding(horizontal = PAGE_GUTTER, vertical = 8.dp),
+                            )
+                        }
+                    }
                     if (recentlyPlayedLoading) recentlyPlayedSkeleton()
                     // The loading skeleton already owns the hero slot. Until
                     // Recently Played lands, every real shelf must retain its
@@ -182,6 +196,51 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemsIndexedShelves(
                 Shelf(shelf = shelf, onItemClick = onItemClick, onItemLongPress = onItemLongPress)
             }
         }
+    }
+}
+
+/**
+ * The "Surprise Me" action, in the same slim prompt shape as [SignInBanner] so
+ * the two sit together at the top of the Play feed without competing.
+ */
+@Composable
+private fun SurpriseMeRow(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = BitChordIcons.Shuffle,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = stringResource(R.string.surprise_me),
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = stringResource(R.string.surprise_me_subtitle),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Icon(
+            imageVector = BitChordIcons.ChevronRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp),
+        )
     }
 }
 

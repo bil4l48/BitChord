@@ -300,6 +300,10 @@ object Downloads {
     suspend fun delete(context: Context, videoId: String): Boolean = withContext(Dispatchers.IO) {
         val uri = _saved.value[videoId]?.toUri() ?: return@withContext false
         val deleted = DownloadStore.delete(context, uri)
+        // The cover is this track's own copy (never shared by another record),
+        // so it dies with the file rather than orphan itself for the storage
+        // page to keep counting.
+        _savedMetadata.value[videoId]?.artworkPath?.let(DownloadArtwork::deletePath)
         forget(videoId)
         deleted
     }
@@ -505,7 +509,13 @@ object Downloads {
      * still know it is already on the device. A stale id costs nothing: the
      * verification in [savedUri] prunes whichever one stops resolving.
      */
-    private fun remember(asked: Song, fetched: Song, uri: Uri, downloadFormat: String? = null) {
+    private fun remember(
+        asked: Song,
+        fetched: Song,
+        uri: Uri,
+        downloadFormat: String? = null,
+        artworkPath: String? = null,
+    ) {
         val ids = setOf(asked.videoId, fetched.videoId)
         // HLS packages cannot carry MP4 tags. Point the app's own metadata at
         // the cover saved beside their playlist so Downloads remains fully
@@ -514,6 +524,10 @@ object Downloads {
             ?.path?.let(::File)?.parentFile
             ?.listFiles()?.firstOrNull { it.nameWithoutExtension == "cover" }
             ?.let(Uri::fromFile)?.toString()
+        // For every other download [artworkPath] is the per-track cover saved
+        // alongside the app's record — a package's sidecar cover and a plain
+        // file's stored cover never coexist, so one of these always answers.
+        val offlineArtwork = savedArtwork ?: artworkPath
         // Either row may be the one that knew the release: a music video is
         // swapped for the catalogue track before this, and it is the catalogue
         // row that usually carries the album — but a search hit tapped directly
@@ -524,21 +538,23 @@ object Downloads {
             videoId = asked.videoId,
             title = asked.title,
             artist = asked.artist,
-            thumbnailUrl = savedArtwork ?: asked.thumbnailUrl,
+            thumbnailUrl = offlineArtwork ?: asked.thumbnailUrl,
             durationText = asked.durationText,
             albumName = album,
             uri = uri.toString(),
             downloadFormat = downloadFormat,
+            artworkPath = artworkPath,
         )
         val metaFetched = SavedSongMetadata(
             videoId = fetched.videoId,
             title = fetched.title,
             artist = fetched.artist,
-            thumbnailUrl = savedArtwork ?: fetched.thumbnailUrl,
+            thumbnailUrl = offlineArtwork ?: fetched.thumbnailUrl,
             durationText = fetched.durationText,
             albumName = album,
             uri = uri.toString(),
             downloadFormat = downloadFormat,
+            artworkPath = artworkPath,
         )
         record(
             saved = { it + ids.associateWith { id -> uri.toString() } },
@@ -590,7 +606,11 @@ object Downloads {
                             videoId = meta.videoId,
                             title = meta.title,
                             artist = meta.artist,
-                            thumbnailUrl = meta.thumbnailUrl,
+                            thumbnailUrl = DownloadArtwork.offlineThumbnail(
+                                remote = meta.thumbnailUrl,
+                                artworkPath = meta.artworkPath,
+                                artworkExists = DownloadArtwork.exists(meta.artworkPath),
+                            ),
                             durationText = meta.durationText,
                             albumName = meta.albumName,
                             localUri = meta.uri,
@@ -790,7 +810,12 @@ object Downloads {
         // Already there from a previous run the record lost track of — adopt it
         // rather than writing a second copy beside it.
         plan.alreadyAt?.let { uri ->
-            remember(song, track, uri)
+            remember(
+                song,
+                track,
+                uri,
+                artworkPath = DownloadArtwork.path(context, track.videoId),
+            )
             DownloadSession.done(id)
             clear(id)
             return
@@ -819,14 +844,22 @@ object Downloads {
                 // sidecars for exactly the same lyrics and full-resolution cover.
                 if (route.taggable && (route.offlineHls != null || MediaTagger.carriesTags(route.extension))) {
                     lyrics = async { LyricsTag.forTrack(track) }
-                    artwork = async { MediaTagger.artworkFor(track) }
+                    // Reuse the cover saved for an earlier download of this
+                    // track rather than fetching it again — one artwork fetch
+                    // per track ever, not per download.
+                    artwork = async { coverFor(context, track) }
                 }
 
                 val name = DownloadStore.fileNameFor(track, route.extension)
                 val alreadyThere = DownloadStore.existing(context, name)
                 if (alreadyThere != null) {
                     Log.d(TAG, "$name is already in Music; adopting it")
-                    remember(song, track, alreadyThere)
+                    remember(
+                        song,
+                        track,
+                        alreadyThere,
+                        artworkPath = DownloadArtwork.path(context, track.videoId),
+                    )
                     DownloadSession.done(id)
                     clear(id)
                     return@coroutineScope
@@ -883,7 +916,12 @@ object Downloads {
                 MediaTagger.embed(context, destination.tagUri, track, route.extension, words, cover)
                 val savedUri = destination.commit()
                 pending = null
-                remember(song, track, savedUri, route.downloadFormat)
+                // The same artwork stays on the app's side so the row keeps it
+                // offline even if Coil's artwork cache is emptied or evicted.
+                // Written only after the audio is committed, so a download that
+                // failed on the way here leaves no cover record behind it.
+                val artworkPath = cover?.let { DownloadArtwork.save(context, track.videoId, it.bytes) }
+                remember(song, track, savedUri, route.downloadFormat, artworkPath)
                 DownloadSession.done(id)
                 clear(id)
                 Log.d(TAG, "saved $name")
@@ -901,6 +939,17 @@ object Downloads {
             artwork?.cancel()
         }
     }
+
+    /**
+     * The artwork to embed (and, on a finished download, to keep) for [track]:
+     * the cover already saved by an earlier download of the same track where
+     * one exists, otherwise [MediaTagger.artworkFor]'s fetch. Reuse means a
+     * track is fetched from the network for its artwork exactly once — every
+     * later re-download, and every fully-lossless adopt, embeds and reuses the
+     * stored JPEG instead of paying for it again.
+     */
+    private fun coverFor(context: Context, track: Song): MediaTagger.Artwork? =
+        DownloadArtwork.load(context, track.videoId) ?: MediaTagger.artworkFor(track)
 
     /**
      * One resolved download: what to call the file, what to tell the store it
@@ -1170,6 +1219,18 @@ internal data class SavedSongMetadata(
     val albumName: String? = null,
     val uri: String,
     val downloadFormat: String? = null,
+    /**
+     * A local cover saved beside the app's own records ([DownloadArtwork]) for
+     * every kind of download, not just the offline packages [thumbnailUrl]
+     * already points at a `cover.*` for. When this is set and the file it
+     * names still exists, reads of this record replace the remote thumbnail
+     * with it, so a downloaded track keeps its artwork with no network.
+     *
+     * Added after the fact and defaulted, so a record written before it existed
+     * still decodes — those come back with a null [artworkPath] and render the
+     * recorded remote thumbnail exactly as they always did.
+     */
+    val artworkPath: String? = null,
 )
 
 /** Labels intentionally only distinguish premium formats, not ordinary AAC/Opus downloads. */

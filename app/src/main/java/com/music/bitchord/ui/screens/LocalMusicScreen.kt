@@ -56,8 +56,6 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.Sort
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -69,6 +67,7 @@ import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -99,6 +98,7 @@ import com.music.bitchord.data.model.isSameTrackAs
 import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.settings.LibraryViewType
 import com.music.bitchord.data.settings.LocalMusicSort
+import com.music.bitchord.data.stats.ListeningStats
 import com.music.bitchord.download.DownloadedCollection
 import com.music.bitchord.ui.components.MessageState
 import com.music.bitchord.ui.components.PAGE_GUTTER
@@ -187,7 +187,14 @@ fun LocalMusicScreen(
     } else {
         AppSettings.localMusicViewType.collectAsStateWithLifecycle()
     }
-    val sortedSongs = remember(songs, sortOrder) { songs.sortedForLibrary(sortOrder) }
+    // The device's own play counts, loaded once per visit, drive the play-count
+    // sort orders. Kept out of the `songs` recomposition key, so sorting by a
+    // freshly landed play does not churn the list under the reader.
+    var playCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    LaunchedEffect(Unit) { playCounts = ListeningStats.playCounts() }
+    val sortedSongs = remember(songs, sortOrder, playCounts) {
+        songs.sortedForLibrary(sortOrder, playCounts)
+    }
     var selectedDownloadIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     // Kept separately from the tracks selected for deletion: different albums
     // can share tracks, so inferring an album's selection from those track ids
@@ -428,11 +435,11 @@ fun LocalMusicScreen(
                 }
 
                 key == "tab:$LOCAL_TAB_ARTISTS" -> {
-                    val artists = remember(sortedSongs, searchQuery) {
+                    val artists = remember(sortedSongs, searchQuery, sortOrder, playCounts) {
                         sortedSongs.groupBy { it.artist }
                             .entries
                             .filter { searchQuery.isBlank() || it.key.contains(searchQuery, ignoreCase = true) }
-                            .sortedBy { it.key.lowercase(Locale.ROOT) }
+                            .sortedForArtists(sortOrder, playCounts)
                     }
                     ArtistsTab(
                         artists = artists,
@@ -449,12 +456,14 @@ fun LocalMusicScreen(
 
                 else -> {
                     // LOCAL_TAB_ALBUMS
-                    val albums = remember(sortedSongs, collections, searchQuery) {
-                        albumEntries(sortedSongs, collections).filter {
-                            searchQuery.isBlank() ||
-                                it.title.contains(searchQuery, ignoreCase = true) ||
-                                it.artist.contains(searchQuery, ignoreCase = true)
-                        }
+                    val albums = remember(sortedSongs, collections, searchQuery, sortOrder, playCounts) {
+                        albumEntries(sortedSongs, collections)
+                            .filter {
+                                searchQuery.isBlank() ||
+                                    it.title.contains(searchQuery, ignoreCase = true) ||
+                                    it.artist.contains(searchQuery, ignoreCase = true)
+                            }
+                            .sortedForAlbums(sortOrder, playCounts)
                     }
                     AlbumsTab(
                         albums = albums,
@@ -919,6 +928,42 @@ private fun albumEntries(
         compareByDescending<AlbumEntry> { it.asked }.thenBy { it.title.lowercase(Locale.ROOT) },
     )
 }
+
+/**
+ * The Artists tab, ordered by the folder's current sort. A grouping's title is
+ * the artist's name, its plays are the sum of its tracks' plays, and its "added"
+ * date is the newest track in it — ordering by the same quantities the Songs tab
+ * orders its rows by, so the three tabs never disagree about what a choice means.
+ */
+internal fun List<Map.Entry<String, List<Song>>>.sortedForArtists(
+    order: LocalMusicSort,
+    playCounts: Map<String, Int>,
+): List<Map.Entry<String, List<Song>>> = sortByOrder(
+    items = this,
+    order = order,
+    title = { it.key },
+    playCount = { entry -> entry.value.sumOf { playCounts[it.videoId] ?: 0 } },
+    dateAdded = { entry -> entry.value.maxOfOrNull { it.localDateAddedSeconds ?: Long.MIN_VALUE } },
+    dateModified = { entry -> entry.value.maxOfOrNull { it.localDateModifiedSeconds ?: Long.MIN_VALUE } },
+)
+
+/**
+ * The Albums tab, ordered by the folder's current sort. [LocalMusicSort.DEFAULT]
+ * keeps the merge's natural order (downloaded releases first, then alphabetical);
+ * every other option sorts the whole grid together by the same quantities the
+ * Songs tab orders its rows by, summed/aggregated per release.
+ */
+private fun List<AlbumEntry>.sortedForAlbums(
+    order: LocalMusicSort,
+    playCounts: Map<String, Int>,
+): List<AlbumEntry> = sortByOrder(
+    items = this,
+    order = order,
+    title = { it.title },
+    playCount = { entry -> entry.songs.sumOf { playCounts[it.videoId] ?: 0 } },
+    dateAdded = { entry -> entry.songs.maxOfOrNull { it.localDateAddedSeconds ?: Long.MIN_VALUE } },
+    dateModified = { entry -> entry.songs.maxOfOrNull { it.localDateModifiedSeconds ?: Long.MIN_VALUE } },
+)
 
 @Composable
 private fun AlbumsTab(
@@ -1429,19 +1474,6 @@ private fun Song.matchesSearch(query: String): Boolean =
         artist.contains(query, ignoreCase = true) ||
         albumName?.contains(query, ignoreCase = true) == true
 
-private fun List<Song>.sortedForLibrary(order: LocalMusicSort): List<Song> = when (order) {
-    LocalMusicSort.TITLE_ASC -> sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title })
-    LocalMusicSort.TITLE_DESC -> sortedWith(compareByDescending<Song> { it.title.lowercase(Locale.ROOT) })
-    LocalMusicSort.DATE_ADDED -> sortedWith(
-        compareByDescending<Song> { it.localDateAddedSeconds ?: Long.MIN_VALUE }
-            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.title },
-    )
-    LocalMusicSort.DATE_MODIFIED -> sortedWith(
-        compareByDescending<Song> { it.localDateModifiedSeconds ?: Long.MIN_VALUE }
-            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.title },
-    )
-}
-
 /**
  * The filter box above the tab row.
  *
@@ -1547,41 +1579,15 @@ private fun LocalSearchField(
                     modifier = Modifier.size(19.dp),
                 )
             }
-            DropdownMenu(
+            LocalMusicSortMenu(
                 expanded = sortMenuOpen,
-                onDismissRequest = { sortMenuOpen = false },
-            ) {
-                LocalMusicSort.entries.forEach { option ->
-                    DropdownMenuItem(
-                        text = { Text(option.localizedLabel()) },
-                        trailingIcon = if (option == sortOrder) {
-                            {
-                                Icon(
-                                    Icons.Rounded.Check,
-                                    contentDescription = stringResource(R.string.selected),
-                                    modifier = Modifier.size(18.dp),
-                                )
-                            }
-                        } else {
-                            null
-                        },
-                        onClick = {
-                            onSortOrderChange(option)
-                            sortMenuOpen = false
-                        },
-                    )
-                }
-            }
+                onDismiss = { sortMenuOpen = false },
+                current = sortOrder,
+                options = FOLDER_SORT_OPTIONS,
+                onSelect = onSortOrderChange,
+            )
         }
     }
-}
-
-@Composable
-private fun LocalMusicSort.localizedLabel(): String = when (this) {
-    LocalMusicSort.TITLE_ASC -> stringResource(R.string.sort_title_ascending)
-    LocalMusicSort.TITLE_DESC -> stringResource(R.string.sort_title_descending)
-    LocalMusicSort.DATE_ADDED -> stringResource(R.string.sort_date_added)
-    LocalMusicSort.DATE_MODIFIED -> stringResource(R.string.sort_date_modified)
 }
 
 /** The Downloads-only replacement for the usual search and sort controls. */
