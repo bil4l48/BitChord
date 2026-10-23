@@ -1,0 +1,44 @@
+name: Android Debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [upgrade-work]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build requirements
+        run: |
+          sdkmanager "platforms;android-37" \
+            "build-tools;36.0.0" \
+            "cmake;3.22.1" \
+            "ndk;27.0.12077973"
+
+      - name: Build production debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleProdDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BitChord-hybrid-debug
+          path: app/build/outputs/apk/prod/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
